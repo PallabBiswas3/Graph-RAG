@@ -1,19 +1,20 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { supabase } from "./supabase";
+import { generateEmbedding } from "./embedding";
+import path from "path";
 
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import fs from 'fs/promises';
-import path from 'path';
-
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
 if (!GOOGLE_API_KEY) {
-  console.error("GOOGLE_API_KEY is not set in the environment variables.");
+  console.error("GOOGLE_API_KEY is not set.");
   process.exit(1);
 }
 
@@ -22,177 +23,187 @@ const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
 app.use(cors());
 app.use(express.json());
 
-// Path to store the graph data
-const GRAPH_DB_PATH = path.join(__dirname, 'graph_db.json');
+/* =========================
+   READ GRAPH
+========================= */
 
-// Helper to read/write graph data
-interface GraphData {
-  nodes: any[];
-  links: any[];
+const readGraphData = async () => {
+  const { data: nodes } = await supabase.from("nodes").select("*");
+  const { data: links } = await supabase.from("links").select("*");
+
+  return {
+    nodes: nodes || [],
+    links: links || [],
+  };
+};
+
+/* =========================
+   INSERT GRAPH
+========================= */
+
+async function insertGraph(graph: any) {
+  for (const node of graph.nodes) {
+    const embedding = await generateEmbedding(
+      node.label + " " + (node.description || "")
+    );
+
+    await supabase.from("nodes").upsert({
+      id: node.id,
+      label: node.label,
+      type: node.type,
+      description: node.description,
+      embedding,
+    });
+  }
+
+  if (graph.links?.length) {
+    await supabase.from("links").insert(graph.links);
+  }
 }
 
-const readGraphData = async (): Promise<GraphData> => {
-  try {
-    const data = await fs.readFile(GRAPH_DB_PATH, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { nodes: [], links: [] }; // Return empty graph if file doesn't exist
-    }
-    throw error;
-  }
-};
+/* =========================
+   GRAPH FETCH
+========================= */
 
-const writeGraphData = async (data: GraphData): Promise<void> => {
-  await fs.writeFile(GRAPH_DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-};
-
-// API Endpoints
-app.get('/api/graph', async (req, res) => {
+app.get("/api/graph", async (req, res) => {
   try {
     const graphData = await readGraphData();
     res.json(graphData);
   } catch (error) {
-    console.error("Failed to read graph data:", error);
     res.status(500).json({ message: "Failed to retrieve graph data" });
   }
 });
 
-app.post('/api/graph/extract', async (req, res) => {
+/* =========================
+   GRAPH EXTRACTION
+========================= */
+
+app.post("/api/graph/extract", async (req, res) => {
   const { text } = req.body;
-  if (!text) {
-    return res.status(400).json({ message: "Text content is required for extraction." });
-  }
+  if (!text) return res.status(400).json({ message: "Text required" });
 
   try {
-    // Placeholder for actual Gemini interaction
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-    const prompt = `Extract a knowledge graph from the following text.
-    Represent entities as nodes and relationships as links.
-    Nodes should have 'id', 'label', 'type', and optionally 'description'.
-    Links should have 'source', 'target', and 'type'.
-    Return a JSON object with 'nodes' and 'links' arrays.
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.0-flash",
+    });
 
-    Text: """
-    ${text}
-    """
+    const result = await model.generateContent(`
+Extract a structured technical knowledge graph in JSON format.
 
-    Example JSON structure:
-    {
-      "nodes": [
-        {"id": "node1", "label": "Node Label 1", "type": "TypeA"},
-        {"id": "node2", "label": "Node Label 2", "type": "TypeB", "description": "Description of node 2"}
-      ],
-      "links": [
-        {"source": "node1", "target": "node2", "type": "REL_TYPE"}
-      ]
-    }
-    `;
+Return format:
+{
+  "nodes": [],
+  "links": []
+}
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const rawContent = response.text();
+TEXT:
+${text}
+    `);
 
-    // Attempt to parse content, handle markdown code blocks
-    let parsedGraph;
-    try {
-        if (rawContent.startsWith("```json") && rawContent.endsWith("```")) {
-            parsedGraph = JSON.parse(rawContent.substring(7, rawContent.length - 3).trim());
-        } else {
-            parsedGraph = JSON.parse(rawContent);
-        }
-    } catch (parseError) {
-        console.error("Failed to parse Gemini response as JSON:", parseError);
-        console.error("Raw Gemini response:", rawContent);
-        return res.status(500).json({ message: "Failed to parse Gemini response for graph extraction." });
-    }
+    const raw = result.response.text();
 
-    const currentGraph = await readGraphData();
-    const existingNodeIds = new Set(currentGraph.nodes.map(n => n.id));
-    const newNodes = parsedGraph.nodes.filter((n: any) => !existingNodeIds.has(n.id));
+    const parsedGraph = raw.startsWith("```")
+      ? JSON.parse(raw.replace(/```json|```/g, "").trim())
+      : JSON.parse(raw);
 
-    const updatedGraph = {
-      nodes: [...currentGraph.nodes, ...newNodes],
-      links: [...currentGraph.links, ...parsedGraph.links]
-    };
+    await insertGraph(parsedGraph);
 
-    await writeGraphData(updatedGraph);
-    res.json(updatedGraph);
-
+    res.json(parsedGraph);
   } catch (error) {
-    console.error("Error during graph extraction:", error);
-    res.status(500).json({ message: "Error processing text for knowledge graph extraction." });
+    console.error("Extraction error:", error);
+    res.status(500).json({ message: "Extraction failed" });
   }
 });
 
-app.post('/api/graph/query', async (req, res) => {
-  const { query, graph } = req.body; // 'graph' here would be the current graph data from client
-  if (!query) {
-    return res.status(400).json({ message: "Query text is required." });
+/* =========================
+   GRAPH RAG QUERY
+========================= */
+
+async function queryGraphRAG(query: string) {
+  const queryEmbedding = await generateEmbedding(query);
+
+  // 1️⃣ Semantic search
+  const { data: relevantNodes } = await supabase.rpc("match_nodes", {
+    query_embedding: queryEmbedding,
+    match_count: 5,
+  });
+
+  const nodeIds = relevantNodes?.map((n: any) => n.id) || [];
+
+  if (nodeIds.length === 0) {
+    return "No relevant knowledge found in graph.";
   }
-  if (!graph) {
-    return res.status(400).json({ message: "Graph data is required for querying." });
-  }
+
+  // 2️⃣ Recursive expansion
+  const { data: subgraph } = await supabase.rpc("expand_graph", {
+    start_ids: nodeIds,
+    max_depth: 2,
+  });
+
+  const context =
+    subgraph?.map(
+      (e: any) => `${e.source} ${e.relationship} ${e.target}`
+    ).join("\n") || "";
+
+  // 3️⃣ LLM reasoning
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+  });
+
+  const result = await model.generateContent(`
+You are answering using a knowledge graph.
+
+Knowledge:
+${context}
+
+Question:
+${query}
+
+Answer clearly and technically.
+  `);
+
+  return result.response.text();
+}
+
+/* =========================
+   CHAT ENDPOINT
+========================= */
+
+app.post("/api/chat", async (req, res) => {
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ message: "Query required" });
 
   try {
-    // This part would involve more sophisticated graph traversal and RAG
-    // For now, we'll send the query and the graph structure to Gemini.
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const answer = await queryGraphRAG(query);
 
-    // Construct a prompt that includes the graph data for RAG
-    const graphRepresentation = JSON.stringify(graph, null, 2);
-    const prompt = `Given the following knowledge graph:
-    """
-    ${graphRepresentation}
-    """
-
-    Answer the following question based on the knowledge graph.
-    If the answer requires traversing nodes, please include the 'reasoningTrace' with IDs of traversed nodes in your JSON response.
-
-    Question: "${query}"
-
-    Respond in JSON format like this:
-    {
-      "text": "Your answer based on the graph.",
-      "reasoningTrace": ["nodeId1", "nodeId2"] // Optional, only if traversal was needed
-    }
-    `;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const rawContent = response.text();
-
-    let parsedResponse;
-    try {
-        if (rawContent.startsWith("```json") && rawContent.endsWith("```")) {
-            parsedResponse = JSON.parse(rawContent.substring(7, rawContent.length - 3).trim());
-        } else {
-            parsedResponse = JSON.parse(rawContent);
-        }
-    } catch (parseError) {
-        console.error("Failed to parse Gemini response for query as JSON:", parseError);
-        console.error("Raw Gemini query response:", rawContent);
-        return res.status(500).json({ message: "Failed to parse Gemini response for graph query." });
-    }
-
-    res.json(parsedResponse);
-
+    res.json({
+      role: "assistant",
+      content: answer,
+    });
   } catch (error) {
-    console.error("Error during graph query:", error);
-    res.status(500).json({ message: "Error querying knowledge graph." });
+    console.error("RAG error:", error);
+    res.status(500).json({ message: "Query failed" });
   }
 });
 
-app.post('/api/graph/clear', async (req, res) => {
-  try {
-    await writeGraphData({ nodes: [], links: [] });
-    res.status(200).json({ message: "Graph data cleared successfully." });
-  } catch (error) {
-    console.error("Error clearing graph data:", error);
-    res.status(500).json({ message: "Failed to clear graph data." });
-  }
+/* =========================
+   CLEAR GRAPH
+========================= */
+
+app.post("/api/graph/clear", async (req, res) => {
+  await supabase.from("links").delete().neq("id", "");
+  await supabase.from("nodes").delete().neq("id", "");
+
+  res.json({ message: "Graph cleared" });
 });
 
+/* =========================
+   ROOT
+========================= */
+
+app.get("/", (req, res) => {
+  res.send("Backend running 🚀");
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);

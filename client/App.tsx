@@ -128,6 +128,7 @@ const App: React.FC = () => {
     }
   }, []);
 
+
   const handleQuery = useCallback(
     async (query: string) => {
       if (!query.trim()) return;
@@ -140,7 +141,7 @@ const App: React.FC = () => {
       dispatch({ type: "SET_LOADING", payload: { rag: true } });
 
       try {
-        const response = await queryGraphRAG(query, state.graph);
+        const response = await queryGraphRAG(query);
         dispatch({ type: "ADD_MESSAGE", payload: response });
       } catch {
         dispatch({
@@ -178,11 +179,11 @@ const App: React.FC = () => {
         onClear={handleClearGraph}
       />
 
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col">
         <Header graph={state.graph} loading={state.loading.extract} />
 
         <main className="flex-1 overflow-hidden rounded-tl-xl bg-gray-950 shadow-inner">
-          <div className="h-full w-full overflow-y-auto">
+          <div className="h-full w-full overflow-hidden relative">
             {state.view === "input" && (
               <IngestionPanel
                 loading={state.loading.extract}
@@ -203,6 +204,8 @@ const App: React.FC = () => {
                 messages={state.messages}
                 loading={state.loading.rag}
                 onSend={handleQuery}
+                graph={state.graph}
+                onClose={() => handleViewChange("graph")}
               />
             )}
           </div>

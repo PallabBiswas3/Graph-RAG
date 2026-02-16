@@ -19,9 +19,12 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/pdfjs-dist": "^2.10.378",
     "concurrently": "^8.2.2"
   },
   "dependencies": {
-    "@tailwindcss/postcss": "^4.1.18"
+    "@supabase/supabase-js": "^2.95.3",
+    "@tailwindcss/postcss": "^4.1.18",
+    "pdfjs-dist": "^5.4.624"
   }
 }

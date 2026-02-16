@@ -11,7 +11,7 @@ import { GraphData, Node, Link } from "../types";
 /* Extend D3 Types                    */
 /* ---------------------------------- */
 
-interface GraphNode extends SimulationNodeDatum, Node {}
+interface GraphNode extends SimulationNodeDatum, Node { }
 
 interface GraphLink extends SimulationLinkDatum<GraphNode> {
   relationship: string;
@@ -35,8 +35,29 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
   useEffect(() => {
     if (!svgRef.current || data.nodes.length === 0) return;
 
-    const width = svgRef.current.clientWidth;
-    const height = svgRef.current.clientHeight;
+    const container = svgRef.current.parentElement;
+    let width = container?.clientWidth || 800;
+    let height = container?.clientHeight || 600;
+
+    const updateDimensions = () => {
+      width = container?.clientWidth || 800;
+      height = container?.clientHeight || 600;
+
+      const svg = d3.select(svgRef.current);
+      svg
+        .attr("width", width)
+        .attr("height", height)
+        .attr("viewBox", `0 0 ${width} ${height}`);
+    };
+
+    // Initial dimensions
+    updateDimensions();
+
+    // Add resize observer
+    const resizeObserver = new ResizeObserver(updateDimensions);
+    if (container) {
+      resizeObserver.observe(container);
+    }
 
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
@@ -74,6 +95,7 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         .force("charge", d3.forceManyBody().strength(-400))
         .force("center", d3.forceCenter(width / 2, height / 2))
         .force("collision", d3.forceCollide<GraphNode>().radius(60));
+
 
     /* ---------------------------------- */
     /* Links                              */
@@ -149,14 +171,12 @@ const GraphCanvas: React.FC<GraphCanvasProps> = ({
         .attr(
           "x",
           (d) =>
-            ((d.source as GraphNode).x! +
-              (d.target as GraphNode).x!) / 2
+            (((d.source as GraphNode).x! + (d.target as GraphNode).x!) / 2)
         )
         .attr(
           "y",
           (d) =>
-            ((d.source as GraphNode).y! +
-              (d.target as GraphNode).y!) / 2
+            (((d.source as GraphNode).y! + (d.target as GraphNode).y!) / 2)
         );
 
       node.attr(

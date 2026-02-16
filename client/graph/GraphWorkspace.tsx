@@ -6,7 +6,7 @@ import { GraphData, Node } from "../types";
 interface Props {
   graph: GraphData;
   selectedNode: Node | null;
-  onSelect: (node: Node|null) => void;
+  onSelect: (node: Node | null) => void;
 }
 
 const GraphWorkspace: React.FC<Props> = ({
@@ -15,7 +15,7 @@ const GraphWorkspace: React.FC<Props> = ({
   onSelect,
 }) => {
   return (
-    <div className="flex-1 relative bg-gray-950">
+    <div className="flex-1 relative bg-gray-950 w-full h-full">
       <GraphCanvas data={graph} onNodeClick={onSelect} />
 
       {selectedNode && (
