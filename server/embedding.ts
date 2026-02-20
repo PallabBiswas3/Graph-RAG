@@ -7,7 +7,7 @@ const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
 
 export async function generateEmbedding(text: string) {
     const model = genAI.getGenerativeModel({
-        model: "gemini-embedding-001",   // ✅ UPDATED MODEL
+        model: "embedding-001",   // ✅ UPDATED MODEL
     });
 
     const result = await model.embedContent(text);
