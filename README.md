@@ -16,27 +16,27 @@ A sophisticated Graph-RAG system that extracts knowledge graphs from research pa
 - 💬 **Graph-Aware Q&A** - Intelligent chat with reasoning traces
 - 🎯 **Modern UI** - Dark theme with responsive design
 - 🔍 **Entity Types** - Papers, Authors, Concepts, Methods, Results, Datasets, Problems
+- 🧠 **Advanced Graph-RAG** - Sub-graph extraction with contextual AI prompting
+- 📊 **Vector Embeddings** - Semantic search capabilities for enhanced retrieval
+- 🎨 **Dynamic Chat Modal** - Centered interface that preserves sidebar navigation
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Node.js 18+
 - Google Gemini API key
+- npm or yarn
 
 ### Installation
+
 ```bash
 git clone https://github.com/yourusername/litgraph-ai.git
 cd litgraph-ai
 npm install
-
-# Setup frontend
-cd client && npm install
-
-# Setup backend  
-cd ../server && npm install
 ```
 
 ### Environment Setup
+
 Create `.env` in `server/`:
 ```env
 GOOGLE_API_KEY=your_gemini_api_key
@@ -44,6 +44,7 @@ PORT=3000
 ```
 
 ### Run Development Servers
+
 ```bash
 # Terminal 1 - Backend
 cd server && npm run dev
@@ -57,13 +58,13 @@ Access at http://localhost:5173
 ## 📖 Usage
 
 1. **Upload PDF**: Drag and drop research papers or paste text
-2. **Explore Graph**: Navigate the interactive knowledge graph
+2. **Explore Graph**: Navigate to interactive knowledge graph
 3. **Ask Questions**: Query the graph with AI-powered reasoning
 
 ## 🏗️ Architecture
 
 ```
-Frontend (React) ←→ Backend (Express) ←→ AI Service (Gemini API)
+Frontend (React) ←→ Backend (Express) ←→ AI Service (Gemini) ←→ Vector DB (Supabase)
      ↓                    ↓                      ↓
 PDF Processing      Graph Storage        Knowledge Extraction
 Graph Viz          API Routes           Question Answering
@@ -76,166 +77,12 @@ Chat Interface     Data Persistence     Reasoning Traces
 litgraph-ai/
 ├── client/                 # React frontend
 │   ├── components/        # UI components
-│   ├── services/         # API services
-│   ├── graph/            # Graph visualization
-│   └── ingestion/        # PDF upload & text input
-├── server/               # Express backend
-│   ├── server.ts         # Main server
-│   └── graph_db.json     # Graph storage
-├── README.md            # Documentation
-└── LICENSE              # MIT License
-```
-
-## 🔌 API
-
-- `GET /api/graph` - Retrieve knowledge graph
-- `POST /api/graph/extract` - Extract graph from text
-- `POST /api/graph/query` - Query with AI reasoning
-- `POST /api/graph/clear` - Clear graph data
-
-## 🛠️ Tech Stack
-
-**Frontend**: React, TypeScript, Vite, TailwindCSS, D3.js, PDF.js  
-**Backend**: Node.js, Express, TypeScript  
-**AI**: Google Gemini API, Graph-RAG
-
-## � License
-
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 🙏 Acknowledgments
-
-- Google Gemini API for AI-powered analysis
-- D3.js for interactive visualizations
-- PDF.js for text extraction
-
----
-
-**Built with ❤️ for research literature analysis**
-
-## 🌟 Features
-
-### 📄 PDF Processing
-- **PDF Upload**: Drag-and-drop or select research paper PDFs
-- **Text Extraction**: Automatic text extraction using PDF.js
-- **File Validation**: Size limits (10MB) and format checking
-- **Error Handling**: User-friendly error messages
-
-### 🕸️ Knowledge Graph
-- **Entity Extraction**: AI-powered identification of research entities
-- **Relationship Mapping**: Automatic relationship detection between entities
-- **Node Types**: Papers, Authors, Concepts, Methods, Results, Datasets, Problems
-- **Graph Persistence**: Durable storage in JSON format
-
-### 🎨 Interactive Visualization
-- **Force-Directed Graph**: D3.js powered interactive graph visualization
-- **Zoom & Pan**: Smooth navigation through large graphs
-- **Node Inspection**: Click nodes to view detailed information
-- **Color Coding**: Visual distinction by entity type
-- **Drag & Drop**: Reposition nodes for better layout
-
-### 💬 Intelligent Chat
-- **Graph-Aware Q&A**: Questions answered using knowledge graph context
-- **Reasoning Traces**: Visual path showing how answers were derived
-- **Contextual Responses**: AI considers graph relationships in answers
-
-### 🎯 User Interface
-- **Modern Design**: Dark theme with blue accents
-- **Responsive Layout**: Works on different screen sizes
-- **Three-View System**: Input, Graph, and Chat views
-- **Real-time Updates**: Live graph statistics and loading states
-
-## 🏗️ Architecture
-
-### High-Level Overview
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │   Backend       │    │   AI Service    │
-│   (React)       │◄──►│   (Express)     │◄──►│   (Gemini API)  │
-│                 │    │                 │    │                 │
-│ • PDF Upload    │    │ • API Routes    │    │ • Text Analysis │
-│ • Graph Viz     │    │ • Graph Storage │    │ • Knowledge    │
-│ • Chat Interface│    │ • Data Processing│    │   Extraction    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
-### Technology Stack
-
-#### Frontend
-- **React 19** - Modern UI framework with hooks
-- **TypeScript** - Type-safe JavaScript
-- **Vite** - Fast build tool and dev server
-- **TailwindCSS** - Utility-first CSS framework
-- **D3.js** - Data visualization for graphs
-- **PDF.js** - PDF text extraction
-- **Lucide React** - Modern icon library
-
-#### Backend
-- **Node.js** - JavaScript runtime
-- **Express** - Web framework
-- **TypeScript** - Type-safe development
-- **Google Generative AI** - Gemini API integration
-- **File System** - JSON-based graph persistence
-
-#### AI/ML
-- **Google Gemini Pro** - Large language model
-- **Graph-RAG** - Retrieval-augmented generation
-- **Knowledge Graph Extraction** - Entity and relationship parsing
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Node.js 18+ 
-- npm or yarn
-- Google Gemini API key
-
-### 1. Clone and Install
-```bash
-git clone <repository-url>
-cd Graph-RAG
-npm install
-cd client && npm install
-cd ../server && npm install
-```
-
-### 2. Environment Setup
-Create `.env` file in server directory:
-```env
-GOOGLE_API_KEY=your_gemini_api_key_here
-PORT=3000
-```
-
-### 3. Start Development
-```bash
-# Terminal 1 - Start Backend
-cd server
-npm run dev
-
-# Terminal 2 - Start Frontend  
-cd client
-npm run dev
-```
-
-### 4. Access Application
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:3000
-
-## 📁 Project Structure
-
-```
-Graph-RAG/
-├── client/                 # React frontend
-│   ├── components/        # Reusable UI components
 │   │   └── GraphCanvas.tsx    # D3.js graph visualization
 │   ├── graph/            # Graph-related components
 │   │   ├── GraphWorkspace.tsx # Main graph view
 │   │   └── NodeInspector.tsx # Node details panel
-│   ├── ingestion/        # Text input components
-│   │   └── IngestionPanel.tsx # PDF upload & text input
+│   ├── ingestion/        # PDF upload & text input
+│   │   └── IngestionPanel.tsx # PDF processing interface
 │   ├── chat/            # Chat interface
 │   │   └── ChatPanel.tsx     # Q&A interface
 │   ├── layout/          # Layout components
@@ -248,64 +95,19 @@ Graph-RAG/
 │   ├── App.tsx          # Main application component
 │   └── index.tsx        # Application entry point
 ├── server/               # Express backend
-│   ├── server.ts        # Main server file
-│   ├── graph_db.json    # Graph data storage
-│   └── package.json     # Backend dependencies
-└── README.md           # This file
+│   ├── server.ts         # Main server file
+│   ├── embedding.ts      # Vector embedding generation
+│   ├── supabase.ts     # Database integration
+│   └── graph_db.json     # Graph storage
+├── README.md            # Documentation
+└── LICENSE              # MIT License
 ```
 
-## 🔧 Installation
-
-### Frontend Dependencies
-```bash
-cd client
-npm install react react-dom typescript
-npm install vite @vitejs/plugin-react
-npm install tailwindcss postcss autoprefixer
-npm install d3 @types/d3
-npm install lucide-react
-npm install pdfjs-dist
-```
-
-### Backend Dependencies
-```bash
-cd server  
-npm install express cors dotenv
-npm install @google/generative-ai
-npm install typescript @types/node @types/express
-npm install ts-node nodemon
-```
-
-## 💻 Usage
-
-### 1. Upload Research Paper
-- Navigate to the Input view (default)
-- Click "Choose PDF" to upload a research paper
-- Or paste text directly into the textarea
-- Click "Update Graph" to process the text
-
-### 2. Explore Knowledge Graph
-- Switch to Graph view using the sidebar
-- Interact with the visualization:
-  - **Scroll**: Zoom in/out
-  - **Drag**: Move nodes around
-  - **Click**: Select nodes to view details
-  - **Pan**: Click and drag background
-
-### 3. Ask Questions
-- Switch to Chat view
-- Type questions about the research content
-- View AI responses with reasoning traces
-- Example questions:
-  - "What methods were used in these papers?"
-  - "Who are the main authors?"
-  - "What concepts are related to machine learning?"
-
-## 🔌 API Documentation
+## 🔌 API
 
 ### Graph Endpoints
 
-#### GET /api/graph
+#### `GET /api/graph`
 Retrieve current knowledge graph data.
 
 **Response:**
@@ -329,7 +131,7 @@ Retrieve current knowledge graph data.
 }
 ```
 
-#### POST /api/graph/extract
+#### `POST /api/graph/extract`
 Extract knowledge graph from text.
 
 **Request:**
@@ -339,7 +141,7 @@ Extract knowledge graph from text.
 }
 ```
 
-#### POST /api/graph/query
+#### `POST /api/graph/query`
 Query the knowledge graph with AI reasoning.
 
 **Request:**
@@ -358,20 +160,26 @@ Query the knowledge graph with AI reasoning.
 }
 ```
 
-#### POST /api/graph/clear
+#### `POST /api/graph/clear`
 Clear all graph data.
+
+## 🛠️ Tech Stack
+
+**Frontend**: React, TypeScript, Vite, TailwindCSS, D3.js, PDF.js  
+**Backend**: Node.js, Express, TypeScript, Supabase, Google Generative AI  
+**AI**: Google Gemini API, Graph-RAG, Vector Embeddings
 
 ## 🧠 How It Works
 
 ### 1. Text Processing Pipeline
 ```
-PDF/Text Input → Text Extraction → AI Analysis → Graph Generation
+PDF/Text Input → Text Extraction → AI Analysis → Graph Generation → Vector Storage
 ```
 
 1. **PDF Processing**: PDF.js extracts raw text from uploaded files
 2. **AI Analysis**: Gemini API identifies entities and relationships
 3. **Graph Generation**: Structured nodes and links are created
-4. **Storage**: Graph data persists in JSON format
+4. **Vector Storage**: Embeddings stored for semantic search
 
 ### 2. Knowledge Graph Structure
 - **Nodes**: Research entities (papers, authors, concepts, etc.)
@@ -407,97 +215,59 @@ User Question → Graph Context → AI Reasoning → Answer + Trace
 ### ChatPanel
 - **Message History**: Conversation display
 - **Input Interface**: Question submission
-- **Reasoning Traces**: Path visualization
+- **Reasoning Traces**: Path visualization showing AI's logical progression
 - **Loading Indicators**: Processing feedback
-
-### Layout Components
-- **Sidebar**: Navigation between views
-- **Header**: Graph statistics and title
-- **Responsive Design**: Adapts to screen sizes
+- **Dynamic Modal**: Centered overlay with sidebar preservation
 
 ## 🔍 Graph-RAG Pipeline
 
 ### Knowledge Extraction
 ```typescript
-// Gemini prompt structure
+// Enhanced entity extraction with detailed prompts
 const prompt = `
-Extract a knowledge graph from the following text.
-Represent entities as nodes and relationships as links.
-Nodes should have 'id', 'label', 'type', and optionally 'description'.
-Links should have 'source', 'target', and 'type'.
-
-Text: "${text}"
-
-Example JSON structure:
-{
-  "nodes": [
-    {"id": "node1", "label": "Node Label 1", "type": "TypeA"},
-    {"id": "node2", "label": "Node Label 2", "type": "TypeB"}
-  ],
-  "links": [
-    {"source": "node1", "target": "node2", "type": "REL_TYPE"}
-  ]
-}
+Extract a comprehensive knowledge graph from following research text.
+REQUIREMENTS:
+1. Node labels should be COMPLETE and DESCRIPTIVE
+2. Include specific entity types: Paper, Author, Concept, Method, Result, Dataset, Problem
+3. Add descriptions where helpful for context
+4. Create meaningful relationships between entities
 `;
 ```
 
 ### Query Processing
 ```typescript
-// Graph-aware questioning
-const prompt = `
-Given the following knowledge graph:
-"${graphRepresentation}"
+// Sub-graph extraction for enhanced relevance
+const seedNodes = graph.nodes.filter((node: GraphNode) => 
+  query.toLowerCase().includes(node.label.toLowerCase())
+);
 
-Answer the following question based on the knowledge graph.
-If the answer requires traversing nodes, include 'reasoningTrace'.
-
-Question: "${query}"
-
-Response format:
-{
-  "text": "Your answer based on the graph.",
-  "reasoningTrace": ["nodeId1", "nodeId2"]
-}
-`;
+// Contextual prompting with detailed graph structure
+const nodeSummary = graph.nodes.map((node: GraphNode) => 
+  `ID: ${node.id}, Label: ${node.label}, Type: ${node.type}`
+).join('\n');
 ```
 
-## 🛠️ Development
+## 🚀 Development
 
 ### Running Tests
+
 ```bash
 # Frontend tests
-cd client
-npm test
+cd client && npm test
 
 # Backend tests  
-cd server
-npm test
+cd server && npm test
 ```
 
 ### Building for Production
+
 ```bash
 # Frontend build
-cd client
-npm run build
+cd client && npm run build
 
 # Backend build
-cd server
-npm run build
+cd server && npm run build
 ```
-
-### Environment Variables
-```env
-# Backend .env
-GOOGLE_API_KEY=your_gemini_api_key
-PORT=3000
-NODE_ENV=development
-```
-
-### Code Style
-- **TypeScript**: Strict type checking enabled
-- **ESLint**: Code quality and consistency
-- **Prettier**: Code formatting
-- **Tailwind**: Utility-first CSS approach
 
 ## 🐛 Troubleshooting
 
@@ -521,21 +291,6 @@ NODE_ENV=development
 - Ensure network connectivity
 - Review server logs for errors
 
-#### Styling Issues
-- Verify Tailwind CSS is building
-- Check PostCSS configuration
-- Ensure CSS files are loading
-- Clear browser cache
-
-### Debug Mode
-```bash
-# Enable verbose logging
-DEBUG=* npm run dev
-
-# Check network requests
-# Use browser DevTools → Network tab
-```
-
 ## 🤝 Contributing
 
 ### Development Workflow
@@ -551,25 +306,17 @@ DEBUG=* npm run dev
 - Update documentation for changes
 - Test thoroughly before submission
 
-### Feature Ideas
-- [ ] Vector embeddings for semantic search
-- [ ] Multi-modal PDF processing (images, tables)
-- [ ] Graph export formats (JSON, CSV, GraphML)
-- [ ] Collaborative graph editing
-- [ ] Advanced graph algorithms
-- [ ] Real-time collaboration
-
 ## 📄 License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
-- **Google Gemini API** - AI-powered text analysis
-- **D3.js** - Interactive data visualization
-- **PDF.js** - PDF text extraction
-- **React & TypeScript** - Modern web development
-- **TailwindCSS** - Utility-first CSS framework
+- **Google Gemini API** for AI-powered text analysis
+- **D3.js** for interactive data visualization
+- **PDF.js** for PDF text extraction
+- **React & TypeScript** for modern web development
+- **TailwindCSS** for utility-first CSS framework
 
 ---
 
