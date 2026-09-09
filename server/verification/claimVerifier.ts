@@ -2,6 +2,9 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { RetrievedChunk } from "../retrieval/hybridRetriever";
 import { ClaimVerification, VerifiableClaim, VerificationLabel } from "./types";
 
+const VERIFY_TIMEOUT_MS = 20_000;
+const VERIFY_CONCURRENCY = 4;
+
 function cleanJson(raw: string): string {
   return raw.replace(/```json|```/g, "").trim();
 }
@@ -15,6 +18,20 @@ function linkedChunksForClaim(claim: VerifiableClaim, chunks: RetrievedChunk[]):
   const linkedIds = (claim.evidence || []).map((item) => item.chunk_id);
   const linked = linkedIds.map((id) => byId.get(id)).filter(Boolean) as RetrievedChunk[];
   return linked.length ? linked : chunks.slice(0, 3);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} after ${timeoutMs / 1000}s`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function verifyClaimAgainstChunks(
@@ -55,7 +72,8 @@ export async function verifyClaimAgainstChunks(
   const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
 
   try {
-    const result = await model.generateContent(`
+    const result = await withTimeout(
+      model.generateContent(`
 You are a strict claim verifier.
 
 Classify the CLAIM against ONLY the RAW SOURCE CHUNKS below.
@@ -82,7 +100,10 @@ ${claim.claim_text}
 
 RAW SOURCE CHUNKS:
 ${evidenceText}
-`);
+`),
+      VERIFY_TIMEOUT_MS,
+      "Claim verification timed out"
+    );
 
     const parsed = JSON.parse(cleanJson(result.response.text())) as {
       label?: VerificationLabel;
@@ -118,12 +139,24 @@ ${evidenceText}
 export async function verifyClaimsAgainstChunks(
   claims: VerifiableClaim[],
   chunks: RetrievedChunk[],
-  limit = 8
+  limit = 8,
+  concurrency = VERIFY_CONCURRENCY
 ): Promise<ClaimVerification[]> {
   const selected = claims.slice(0, limit);
-  const results: ClaimVerification[] = [];
-  for (const claim of selected) {
-    results.push(await verifyClaimAgainstChunks(claim, chunks));
-  }
+  if (!selected.length) return [];
+
+  const results = new Array<ClaimVerification>(selected.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, selected.length));
+
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= selected.length) return;
+      results[index] = await verifyClaimAgainstChunks(selected[index], chunks);
+    }
+  };
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
 }
