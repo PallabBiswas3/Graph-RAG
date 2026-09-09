@@ -1,4 +1,4 @@
-name: Phase 0 Build
+name: Phase 0-1 Validation
 
 on:
   pull_request:
@@ -8,7 +8,7 @@ on:
       - upgrade/adaptive-evidence-agent-phase0
 
 jobs:
-  build:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,5 +23,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type-check and build client/server
+      - name: Build client and server
         run: npm run build
+
+      - name: Test retrieval metrics
+        run: npm run test:metrics --workspace=server
