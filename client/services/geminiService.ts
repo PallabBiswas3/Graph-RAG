@@ -3,14 +3,14 @@ import { PDFChunk } from "./pdfService";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 
-/* =========================
-   TYPES
-========================= */
-
 export interface SourceCitation {
   nodeId: string;
   nodeLabel: string;
   similarity: number;
+  chunkId?: string;
+  sourceDocId?: string;
+  pageStart?: number;
+  pageEnd?: number;
   chunkContent?: string;
 }
 
@@ -28,10 +28,6 @@ export interface IngestionProgress {
   status: "extracting" | "chunking" | "embedding" | "done" | "error";
   message: string;
 }
-
-/* =========================
-   EXTRACT KNOWLEDGE GRAPH
-========================= */
 
 export const extractKnowledgeGraph = async (
   text: string,
@@ -51,10 +47,6 @@ export const extractKnowledgeGraph = async (
   return response.json();
 };
 
-/* =========================
-   CHUNK -> NODE PROVENANCE
-========================= */
-
 const normalizeNodeId = (id: string): string => id.toLowerCase().replace(/\s+/g, "");
 
 const tokenize = (text: string): Set<string> =>
@@ -62,15 +54,6 @@ const tokenize = (text: string): Set<string> =>
     (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter((token) => token.length > 2)
   );
 
-/**
- * Phase-0 deterministic chunk anchoring.
- *
- * The old pipeline attached every PDF chunk to graph.nodes[0], which made
- * provenance incorrect and polluted graph-aware retrieval. Until semantic
- * chunk-to-entity linking is introduced in a later phase, assign each chunk
- * to the extracted node whose label/description has the strongest lexical
- * evidence in that chunk.
- */
 export const selectAnchorNodeId = (chunk: PDFChunk, graph: GraphData): string | null => {
   if (!graph.nodes.length) return null;
 
@@ -88,7 +71,6 @@ export const selectAnchorNodeId = (chunk: PDFChunk, graph: GraphData): string | 
       if (chunkTerms.has(term)) overlap += 1;
     }
 
-    // Direct mention of an entity label is stronger evidence than loose term overlap.
     const normalizedLabel = node.label.trim().toLowerCase();
     const labelBonus = normalizedLabel.length >= 3 && chunkText.includes(normalizedLabel) ? 3 : 0;
     const confidenceBonus = (node.confidence ?? 0) * 0.05;
@@ -103,10 +85,6 @@ export const selectAnchorNodeId = (chunk: PDFChunk, graph: GraphData): string | 
   return normalizeNodeId(bestNode.id);
 };
 
-/* =========================
-   INGEST PDF CHUNKS INTO SUPABASE
-========================= */
-
 export const ingestPDFChunks = async (
   chunks: PDFChunk[],
   graph: GraphData,
@@ -120,6 +98,7 @@ export const ingestPDFChunks = async (
   }
 
   let failures = 0;
+  let evidenceDeferred = 0;
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
@@ -134,10 +113,10 @@ export const ingestPDFChunks = async (
       total,
       current: i + 1,
       status: "embedding",
-      message: `Embedding chunk ${i + 1} of ${total} (pages ${chunk.pageStart}–${chunk.pageEnd})`,
+      message: `Embedding and grounding chunk ${i + 1} of ${total} (pages ${chunk.pageStart}–${chunk.pageEnd})`,
     });
 
-    const response = await fetch(`${API_BASE_URL}/api/chunks/insert`, {
+    const response = await fetch(`${API_BASE_URL}/api/evidence/chunks/insert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -149,6 +128,7 @@ export const ingestPDFChunks = async (
           ...chunk.metadata,
           pageStart: chunk.pageStart,
           pageEnd: chunk.pageEnd,
+          sourceDocId,
           anchorStrategy: "lexical-node-evidence-v1",
         },
       }),
@@ -157,10 +137,15 @@ export const ingestPDFChunks = async (
     if (!response.ok) {
       failures += 1;
       console.error(`Failed to insert chunk ${i + 1}`);
+    } else {
+      const result = await response.json();
+      if (result.evidenceStatus === "deferred") {
+        evidenceDeferred += 1;
+        console.warn(`Evidence extraction deferred for chunk ${i + 1}:`, result.evidenceWarning);
+      }
     }
 
-    // Keep a small delay to avoid bursting embedding-provider quotas.
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
 
   if (failures > 0) {
@@ -171,13 +156,12 @@ export const ingestPDFChunks = async (
     total,
     current: total,
     status: "done",
-    message: `All ${total} chunks ingested successfully`,
+    message:
+      evidenceDeferred > 0
+        ? `${total} chunks ingested; evidence deferred for ${evidenceDeferred} until the Phase 3 migration/service is available`
+        : `All ${total} chunks ingested with evidence provenance`,
   });
 };
-
-/* =========================
-   QUERY GRAPH (RAG) — WITH STREAMING
-========================= */
 
 export const queryGraphRAGStream = async (
   query: string,
@@ -242,9 +226,10 @@ export const queryGraphRAGStream = async (
         content: fullContent.trimEnd(),
         sources,
         reasoningTrace,
-        confidence: sources.length > 0
-          ? sources.reduce((acc, s) => acc + s.similarity, 0) / sources.length
-          : undefined,
+        confidence:
+          sources.length > 0
+            ? sources.reduce((acc, source) => acc + source.similarity, 0) / sources.length
+            : undefined,
       });
     } else {
       const data: ChatResponse = await response.json();
@@ -252,24 +237,22 @@ export const queryGraphRAGStream = async (
 
       for (const word of words) {
         onToken(word + " ");
-        await new Promise((r) => setTimeout(r, 18));
+        await new Promise((resolve) => setTimeout(resolve, 18));
       }
 
       onDone({
         ...data,
-        confidence: data.sources && data.sources.length > 0
-          ? data.sources.reduce((acc, s) => acc + s.similarity, 0) / data.sources.length
-          : undefined,
+        confidence:
+          data.sources && data.sources.length > 0
+            ? data.sources.reduce((acc, source) => acc + source.similarity, 0) /
+              data.sources.length
+            : undefined,
       });
     }
   } catch (err: any) {
     onError(err.message || "Unknown error");
   }
 };
-
-/* =========================
-   QUERY GRAPH (RAG) — STANDARD
-========================= */
 
 export const queryGraphRAG = async (query: string): Promise<ChatMessage> => {
   const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -286,19 +269,11 @@ export const queryGraphRAG = async (query: string): Promise<ChatMessage> => {
   return response.json();
 };
 
-/* =========================
-   FETCH GRAPH DATA
-========================= */
-
 export const fetchGraphData = async (): Promise<GraphData> => {
   const response = await fetch(`${API_BASE_URL}/api/graph`);
   if (!response.ok) throw new Error("Failed to fetch graph data");
   return response.json();
 };
-
-/* =========================
-   CLEAR GRAPH DATA
-========================= */
 
 export const clearGraphData = async (): Promise<void> => {
   const response = await fetch(`${API_BASE_URL}/api/graph/clear`, {
