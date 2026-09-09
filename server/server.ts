@@ -5,17 +5,16 @@ import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { supabase } from "./supabase";
 import { generateEmbedding } from "./embedding";
-import { retrieveHybrid } from "./retrieval/hybridRetriever";
 import evidenceRouter from "./evidence/evidenceRouter";
-import { fetchEvidenceForChunks } from "./evidence/evidenceService";
+import { runAdaptiveAgent } from "./agent/adaptiveAgent";
 
 dotenv.config({ path: path.resolve(process.cwd(), "server", ".env") });
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+
 if (!GOOGLE_API_KEY) {
   console.error("GOOGLE_API_KEY is not set.");
   process.exit(1);
@@ -49,13 +48,6 @@ interface Link {
 interface GraphData {
   nodes: Node[];
   links: Link[];
-}
-
-interface SubgraphEdge {
-  source: string;
-  target: string;
-  relationship: string;
-  depth: number;
 }
 
 interface SourceCitation {
@@ -202,46 +194,41 @@ ${text}
   }
 });
 
-async function queryGraphRAG(query: string) {
-  const retrieval = await retrieveHybrid(query, 20);
-  const filteredNodes = retrieval.nodes.filter((node) => node.similarity >= 0.15);
-  const filteredChunks = retrieval.chunks.filter((chunk) => chunk.similarity >= 0.15);
+async function queryAdaptiveGraphAgent(query: string) {
+  const agent = await runAdaptiveAgent(query, { maxSteps: 6, maxRequeries: 1 });
+  const state = agent.state;
 
-  if (!filteredNodes.length && !filteredChunks.length) {
+  if (agent.decision === "abstain" || !state.chunks.length) {
     return {
-      content: "No relevant knowledge found in the graph for your query. Try rephrasing or adding more documents.",
+      content: "I could not find enough source evidence in the uploaded knowledge base to answer this reliably.",
       sources: [],
-      reasoningTrace: [],
+      reasoningTrace: state.trace.map(
+        (item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`
+      ),
     };
   }
 
-  const nodeIds = filteredNodes.map((node) => node.id);
-  const chunkNodeIds = filteredChunks.map((chunk) => chunk.node_id).filter((id) => !nodeIds.includes(id));
-  const allNodeIds = [...new Set([...nodeIds, ...chunkNodeIds])];
+  const requestedNodeIds = [
+    ...new Set([
+      ...state.nodes.map((node) => node.id),
+      ...state.chunks.map((chunk) => chunk.node_id),
+      ...state.expandedNodeIds,
+    ]),
+  ].slice(0, 40);
 
-  const [{ data: subgraph, error: subgraphError }, { data: fullNodes, error: nodesError }] = await Promise.all([
-    supabase.rpc("expand_graph", { start_ids: allNodeIds, max_depth: 2 }),
-    supabase
-      .from("nodes")
-      .select("id,label,type,description,properties,confidence")
-      .in("id", allNodeIds),
-  ]);
-  if (subgraphError) throw subgraphError;
+  const { data: fullNodes, error: nodesError } = requestedNodeIds.length
+    ? await supabase
+        .from("nodes")
+        .select("id,label,type,description,properties,confidence")
+        .in("id", requestedNodeIds)
+    : { data: [], error: null };
   if (nodesError) throw nodesError;
-
-  let evidenceClaims: any[] = [];
-  try {
-    evidenceClaims = await fetchEvidenceForChunks(filteredChunks.map((chunk) => chunk.id));
-  } catch (error) {
-    // Evidence tables may not yet be migrated; raw source chunks remain authoritative fallback.
-    console.warn("Evidence graph unavailable; falling back to chunks:", error);
-  }
 
   const nodeContext =
     (fullNodes || [])
       .map(
         (node: any) =>
-          `[NODE] ${node.label} (${node.type}) — confidence: ${node.confidence ?? 1.0}\n${node.description}${
+          `[NODE] ${node.label} (${node.type}) — confidence: ${node.confidence ?? 1}\n${node.description}${
             node.properties && Object.keys(node.properties).length
               ? `\nProperties: ${JSON.stringify(node.properties)}`
               : ""
@@ -250,51 +237,60 @@ async function queryGraphRAG(query: string) {
       .join("\n\n") || "None";
 
   const edgeContext =
-    ((subgraph || []) as SubgraphEdge[])
+    state.expandedEdges
       .map((edge) => `${edge.source} --[${edge.relationship}]--> ${edge.target}`)
-      .join("\n") || "None";
+      .join("\n") || "Graph expansion was not required by the agent.";
 
-  const chunkContext =
-    filteredChunks
-      .map((chunk, index) => {
-        const metadata = chunk.metadata || {};
-        const pageStart = metadata.pageStart;
-        const pageEnd = metadata.pageEnd;
-        const pageLabel = pageStart
-          ? ` | pages: ${pageStart}${pageEnd && pageEnd !== pageStart ? `-${pageEnd}` : ""}`
-          : "";
-        return `[CHUNK ${index + 1} | id: ${chunk.id} | node: ${chunk.node_id}${pageLabel} | score: ${chunk.similarity.toFixed(3)}]\n${chunk.content}`;
-      })
-      .join("\n\n") || "None";
+  const chunkContext = state.chunks
+    .map((chunk, index) => {
+      const metadata: any = chunk.metadata || {};
+      const pageStart = metadata.pageStart;
+      const pageEnd = metadata.pageEnd;
+      const pages = pageStart
+        ? ` | pages ${pageStart}${pageEnd && pageEnd !== pageStart ? `-${pageEnd}` : ""}`
+        : "";
+      return `[CHUNK ${index + 1} | id ${chunk.id} | node ${chunk.node_id}${pages} | score ${chunk.similarity.toFixed(3)}]\n${chunk.content}`;
+    })
+    .join("\n\n");
 
-  const evidenceContext = evidenceClaims.length
-    ? evidenceClaims
+  const evidenceContext = state.evidenceClaims.length
+    ? state.evidenceClaims
         .map((claim: any, index: number) => {
           const pages = claim.page_start
             ? ` pages ${claim.page_start}${claim.page_end && claim.page_end !== claim.page_start ? `-${claim.page_end}` : ""}`
             : "";
-          const supportingChunkIds = (claim.evidence || []).map((item: any) => item.chunk_id).join(", ");
+          const supportingChunkIds = (claim.evidence || [])
+            .map((item: any) => item.chunk_id)
+            .join(", ");
           return `[CLAIM ${index + 1} | ${claim.polarity} | confidence ${Number(
             claim.extraction_confidence ?? 1
           ).toFixed(2)} | source ${claim.source_doc_id || "unknown"}${pages} | chunks ${supportingChunkIds}]\n${claim.claim_text}`;
         })
         .join("\n\n")
-    : "No structured claims available; rely on the raw source chunks above.";
+    : "No structured claims available; use the original source chunks.";
+
+  const agentTrace = state.trace
+    .map(
+      (item) =>
+        `[STEP ${item.step}] TOOL=${item.tool}\nReason: ${item.reason}\nObservation: ${item.observation}`
+    )
+    .join("\n\n");
 
   const sources: SourceCitation[] = [
-    ...filteredNodes.map((node) => ({
+    ...state.nodes.map((node) => ({
       nodeId: node.id,
       nodeLabel: node.label,
       similarity: node.similarity,
     })),
-    ...filteredChunks.map((chunk) => {
+    ...state.chunks.map((chunk) => {
       const metadata: any = chunk.metadata || {};
       return {
         nodeId: chunk.node_id,
-        nodeLabel: (fullNodes || []).find((node: any) => node.id === chunk.node_id)?.label ?? chunk.node_id,
+        nodeLabel:
+          (fullNodes || []).find((node: any) => node.id === chunk.node_id)?.label ?? chunk.node_id,
         similarity: chunk.similarity,
         chunkId: chunk.id,
-        sourceDocId: metadata.sourceDocId || undefined,
+        sourceDocId: metadata.sourceDocId || metadata.source_doc_id || undefined,
         pageStart: metadata.pageStart,
         pageEnd: metadata.pageEnd,
         chunkContent: chunk.content.slice(0, 160) + (chunk.content.length > 160 ? "…" : ""),
@@ -302,14 +298,12 @@ async function queryGraphRAG(query: string) {
     }),
   ];
 
-  const reasoningTrace = [
-    ...allNodeIds.slice(0, 4),
-    ...evidenceClaims.slice(0, 2).map((claim: any) => `claim:${claim.id}`),
-  ];
-
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
   const result = await model.generateContent(`
-You are a precise evidence-grounded technical assistant.
+You are the synthesis component of a bounded evidence-grounded graph agent.
+
+=== AGENT TOOL TRACE ===
+${agentTrace}
 
 === GRAPH NODES ===
 ${nodeContext}
@@ -327,19 +321,21 @@ ${chunkContext}
 ${query}
 
 Rules:
-- Use ONLY the supplied graph, structured claims, and original source chunks.
-- Treat original source chunks as the ultimate source of truth.
-- A structured claim is usable only because it links back to a retrieved source chunk.
-- Preserve uncertainty, negation, numerical qualifiers, and source disagreement.
-- If evidence conflicts, state the conflict instead of collapsing it into one answer.
-- If the evidence is insufficient, say so explicitly.
-- Cite chunk numbers/pages when making factual statements whenever available.
+- Answer ONLY from the supplied evidence.
+- Original source chunks are the ultimate source of truth.
+- Structured claims are secondary representations linked to those chunks.
+- Do not invent a graph connection merely because the agent did not expand the graph.
+- Preserve uncertainty, negation, numerical qualifiers, and disagreement.
+- If retrieved evidence is insufficient for part of the question, explicitly state that limitation.
+- Cite chunk numbers/pages in the prose whenever practical.
 `);
 
   return {
     content: result.response.text(),
     sources,
-    reasoningTrace,
+    reasoningTrace: state.trace.map(
+      (item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`
+    ),
   };
 }
 
@@ -355,7 +351,7 @@ app.post("/api/chat", async (req, res) => {
   const sendEvent = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const { content, sources, reasoningTrace } = await queryGraphRAG(query);
+    const { content, sources, reasoningTrace } = await queryAdaptiveGraphAgent(query);
     for (const word of content.split(" ")) {
       sendEvent({ token: `${word} ` });
       await new Promise((resolve) => setTimeout(resolve, 12));
@@ -364,13 +360,13 @@ app.post("/api/chat", async (req, res) => {
     res.write("data: [DONE]\n\n");
     res.end();
   } catch (error: any) {
-    console.error("RAG error:", error);
+    console.error("Adaptive agent error:", error);
     sendEvent({ error: error.message || "Query failed" });
     res.end();
   }
 });
 
-// Legacy endpoint retained for compatibility. Phase 3 PDF ingestion uses /api/evidence/chunks/insert.
+// Legacy endpoint retained for compatibility. Phase 3+ PDF ingestion uses /api/evidence/chunks/insert.
 app.post("/api/chunks/insert", async (req, res) => {
   const { node_id, content, chunk_index, metadata, source_url } = req.body;
   if (!node_id || !content) {
@@ -395,7 +391,10 @@ app.post("/api/chunks/insert", async (req, res) => {
 app.post("/api/graph/clear", async (_req, res) => {
   const evidenceTables = ["claim_relations", "claim_entities", "claim_evidence", "claims", "documents"];
   for (const table of evidenceTables) {
-    const { error } = await supabase.from(table).delete().neq("created_at", "1900-01-01T00:00:00Z");
+    const { error } = await supabase
+      .from(table)
+      .delete()
+      .neq("created_at", "1900-01-01T00:00:00Z");
     if (error) console.warn(`Unable to clear optional evidence table ${table}:`, error.message);
   }
 
@@ -405,6 +404,6 @@ app.post("/api/graph/clear", async (_req, res) => {
   res.json({ message: "Graph, chunks, and evidence cleared" });
 });
 
-app.get("/", (_req, res) => res.send("Backend running 🚀"));
+app.get("/", (_req, res) => res.send("Adaptive evidence-grounded GraphRAG backend running 🚀"));
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
