@@ -2,10 +2,18 @@ import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
 import path from "path";
 
-// Load server environment variables. Never expose the server credential to client code.
-dotenv.config({
-  path: path.resolve(__dirname, "..", ".env"),
-});
+// Support both local TypeScript execution and compiled server/dist execution.
+// Existing environment variables always win; no file is allowed to override them.
+const envCandidates = [
+  path.resolve(__dirname, ".env"),
+  path.resolve(__dirname, "..", ".env"),
+  path.resolve(process.cwd(), ".env"),
+  path.resolve(process.cwd(), "server", ".env"),
+];
+
+for (const envPath of [...new Set(envCandidates)]) {
+  dotenv.config({ path: envPath, override: false });
+}
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServerKey =
