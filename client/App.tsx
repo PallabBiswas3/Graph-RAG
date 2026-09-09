@@ -33,7 +33,7 @@ type Action =
   | { type: "SET_VIEW"; payload: View }
   | { type: "SET_GRAPH"; payload: GraphData }
   | { type: "SET_SELECTED_NODE"; payload: Node | null }
-  | { type: "SET_MESSAGES"; payload: ChatMessage[] }
+  | { type: "SET_MESSAGES"; payload: React.SetStateAction<ChatMessage[]> }
   | { type: "CLEAR_MESSAGES" }
   | { type: "SET_LOADING"; payload: Partial<LoadingState> }
   | { type: "SET_INGESTION_PROGRESS"; payload: IngestionProgress | null };
@@ -55,8 +55,13 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, graph: action.payload };
     case "SET_SELECTED_NODE":
       return { ...state, selectedNode: action.payload };
-    case "SET_MESSAGES":
-      return { ...state, messages: action.payload };
+    case "SET_MESSAGES": {
+      const nextMessages =
+        typeof action.payload === "function"
+          ? action.payload(state.messages)
+          : action.payload;
+      return { ...state, messages: nextMessages };
+    }
     case "CLEAR_MESSAGES":
       return { ...state, messages: [] };
     case "SET_LOADING":
@@ -130,10 +135,9 @@ const App: React.FC = () => {
 
   const setMessages = useCallback(
     (action: React.SetStateAction<ChatMessage[]>) => {
-      const next = typeof action === "function" ? action(state.messages) : action;
-      dispatch({ type: "SET_MESSAGES", payload: next });
+      dispatch({ type: "SET_MESSAGES", payload: action });
     },
-    [state.messages]
+    []
   ) as React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 
   const setRagLoading = useCallback(
