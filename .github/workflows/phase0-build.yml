@@ -1,4 +1,4 @@
-name: Phase 0-1 Validation
+name: Phase 0-2 Validation
 
 on:
   pull_request:
@@ -21,7 +21,9 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci --include=optional
+          npm install --no-save @rollup/rollup-linux-x64-gnu
 
       - name: Build client and server
         run: npm run build
