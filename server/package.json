@@ -6,7 +6,9 @@
     "start": "ts-node server.ts",
     "dev": "ts-node-dev --respawn server.ts",
     "build": "tsc",
-    "serve": "node dist/server.js"
+    "serve": "node dist/server.js",
+    "test:metrics": "ts-node evaluation/metrics.test.ts",
+    "eval:retrieval": "ts-node evaluation/runRetrievalBenchmark.ts"
   },
   "keywords": [],
   "author": "",
