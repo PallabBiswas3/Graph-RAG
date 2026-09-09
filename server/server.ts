@@ -162,7 +162,7 @@ app.post("/api/graph/extract", async (req, res) => {
   if (!text) return res.status(400).json({ message: "Text required" });
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
     const result = await model.generateContent(`
 Extract a structured technical knowledge graph from the text below.
 
@@ -344,7 +344,7 @@ async function queryAdaptiveGraphAgent(query: string) {
     }),
   ];
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
   const result = await model.generateContent(`
 You are the synthesis component of a bounded evidence-grounded graph agent with claim verification.
 
