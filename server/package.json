@@ -8,6 +8,7 @@
     "build": "tsc",
     "serve": "node dist/server.js",
     "test:metrics": "ts-node evaluation/metrics.test.ts",
+    "test:retrieval-core": "ts-node evaluation/retrievalCore.test.ts",
     "eval:retrieval": "ts-node evaluation/runRetrievalBenchmark.ts"
   },
   "keywords": [],
