@@ -7,6 +7,7 @@ import { supabase } from "./supabase";
 import { generateEmbedding } from "./embedding";
 import evidenceRouter from "./evidence/evidenceRouter";
 import { runAdaptiveAgent } from "./agent/adaptiveAgent";
+import { runVerificationPipeline } from "./verification/verificationPipeline";
 
 dotenv.config({ path: path.resolve(process.cwd(), "server", ".env") });
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
@@ -208,10 +209,44 @@ async function queryAdaptiveGraphAgent(query: string) {
     };
   }
 
+  const verification = await runVerificationPipeline({
+    originalQuery: query,
+    nodes: state.nodes,
+    chunks: state.chunks,
+    claims: state.evidenceClaims,
+    maxRetries: 1,
+  });
+
+  const verificationTrace = verification.trace.map((item, index) => `verify:${index + 1} — ${item}`);
+
+  if (verification.available && verification.decision === "abstain") {
+    return {
+      content:
+        "I found related material, but claim-level verification did not produce enough reliable support after the bounded retry, so I’m abstaining rather than presenting an uncertain answer.",
+      sources: [],
+      reasoningTrace: [
+        ...state.trace.map((item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`),
+        ...verificationTrace,
+      ],
+    };
+  }
+
+  const workingNodes = verification.nodes;
+  const workingChunks = verification.chunks;
+  const workingClaims = verification.claims;
+  const supportedClaimIds = new Set(
+    verification.results
+      .filter((item) => item.label === "SUPPORTED")
+      .map((item) => item.claimId)
+  );
+  const supportedClaims = verification.available
+    ? workingClaims.filter((claim: any) => supportedClaimIds.has(claim.id))
+    : workingClaims;
+
   const requestedNodeIds = [
     ...new Set([
-      ...state.nodes.map((node) => node.id),
-      ...state.chunks.map((chunk) => chunk.node_id),
+      ...workingNodes.map((node) => node.id),
+      ...workingChunks.map((chunk) => chunk.node_id),
       ...state.expandedNodeIds,
     ]),
   ].slice(0, 40);
@@ -241,7 +276,7 @@ async function queryAdaptiveGraphAgent(query: string) {
       .map((edge) => `${edge.source} --[${edge.relationship}]--> ${edge.target}`)
       .join("\n") || "Graph expansion was not required by the agent.";
 
-  const chunkContext = state.chunks
+  const chunkContext = workingChunks
     .map((chunk, index) => {
       const metadata: any = chunk.metadata || {};
       const pageStart = metadata.pageStart;
@@ -253,21 +288,32 @@ async function queryAdaptiveGraphAgent(query: string) {
     })
     .join("\n\n");
 
-  const evidenceContext = state.evidenceClaims.length
-    ? state.evidenceClaims
+  const evidenceContext = supportedClaims.length
+    ? supportedClaims
         .map((claim: any, index: number) => {
+          const verificationItem = verification.results.find((item) => item.claimId === claim.id);
           const pages = claim.page_start
             ? ` pages ${claim.page_start}${claim.page_end && claim.page_end !== claim.page_start ? `-${claim.page_end}` : ""}`
             : "";
           const supportingChunkIds = (claim.evidence || [])
             .map((item: any) => item.chunk_id)
             .join(", ");
-          return `[CLAIM ${index + 1} | ${claim.polarity} | confidence ${Number(
-            claim.extraction_confidence ?? 1
+          return `[VERIFIED CLAIM ${index + 1} | SUPPORTED | verifier confidence ${Number(
+            verificationItem?.confidence ?? 1
           ).toFixed(2)} | source ${claim.source_doc_id || "unknown"}${pages} | chunks ${supportingChunkIds}]\n${claim.claim_text}`;
         })
         .join("\n\n")
-    : "No structured claims available; use the original source chunks.";
+    : "No structured claims passed verification; rely only on the original source chunks.";
+
+  const verificationFindings = verification.available
+    ? verification.results
+        .filter((item) => item.label !== "SUPPORTED")
+        .map(
+          (item) =>
+            `[${item.label} | confidence ${item.confidence.toFixed(2)}] ${item.claimText}\nReason: ${item.reason}`
+        )
+        .join("\n\n") || "No contradicted or insufficient structured claims."
+    : "Structured claim verification was unavailable; use raw chunks conservatively.";
 
   const agentTrace = state.trace
     .map(
@@ -277,12 +323,12 @@ async function queryAdaptiveGraphAgent(query: string) {
     .join("\n\n");
 
   const sources: SourceCitation[] = [
-    ...state.nodes.map((node) => ({
+    ...workingNodes.map((node) => ({
       nodeId: node.id,
       nodeLabel: node.label,
       similarity: node.similarity,
     })),
-    ...state.chunks.map((chunk) => {
+    ...workingChunks.map((chunk) => {
       const metadata: any = chunk.metadata || {};
       return {
         nodeId: chunk.node_id,
@@ -300,10 +346,18 @@ async function queryAdaptiveGraphAgent(query: string) {
 
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
   const result = await model.generateContent(`
-You are the synthesis component of a bounded evidence-grounded graph agent.
+You are the synthesis component of a bounded evidence-grounded graph agent with claim verification.
 
 === AGENT TOOL TRACE ===
 ${agentTrace}
+
+=== VERIFICATION SUMMARY ===
+available=${verification.available}
+retried=${verification.retried}
+supported=${verification.summary.supported}
+contradicted=${verification.summary.contradicted}
+insufficient=${verification.summary.insufficient}
+selective_score=${verification.summary.calibratedScore.toFixed(3)}
 
 === GRAPH NODES ===
 ${nodeContext}
@@ -311,8 +365,11 @@ ${nodeContext}
 === GRAPH CONNECTIONS ===
 ${edgeContext}
 
-=== STRUCTURED EVIDENCE CLAIMS ===
+=== VERIFIED SUPPORTED CLAIMS ===
 ${evidenceContext}
+
+=== VERIFICATION FINDINGS TO TREAT AS WARNINGS ===
+${verificationFindings}
 
 === ORIGINAL SOURCE CHUNKS ===
 ${chunkContext}
@@ -323,19 +380,21 @@ ${query}
 Rules:
 - Answer ONLY from the supplied evidence.
 - Original source chunks are the ultimate source of truth.
-- Structured claims are secondary representations linked to those chunks.
-- Do not invent a graph connection merely because the agent did not expand the graph.
-- Preserve uncertainty, negation, numerical qualifiers, and disagreement.
-- If retrieved evidence is insufficient for part of the question, explicitly state that limitation.
+- Use structured claims positively only when they appear under VERIFIED SUPPORTED CLAIMS.
+- CONTRADICTED or INSUFFICIENT findings must not be presented as established facts.
+- If sources disagree, explicitly state the disagreement.
+- Preserve uncertainty, negation, numerical qualifiers, and conditions.
+- If the remaining verified evidence is insufficient for part of the question, state that limitation.
 - Cite chunk numbers/pages in the prose whenever practical.
 `);
 
   return {
     content: result.response.text(),
     sources,
-    reasoningTrace: state.trace.map(
-      (item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`
-    ),
+    reasoningTrace: [
+      ...state.trace.map((item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`),
+      ...verificationTrace,
+    ],
   };
 }
 
@@ -404,6 +463,8 @@ app.post("/api/graph/clear", async (_req, res) => {
   res.json({ message: "Graph, chunks, and evidence cleared" });
 });
 
-app.get("/", (_req, res) => res.send("Adaptive evidence-grounded GraphRAG backend running 🚀"));
+app.get("/", (_req, res) =>
+  res.send("Adaptive evidence-grounded GraphRAG backend with claim verification running 🚀")
+);
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
