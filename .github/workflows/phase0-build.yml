@@ -1,4 +1,4 @@
-name: Phase 0-2 Validation
+name: Phase 0-3 Validation
 
 on:
   pull_request:
