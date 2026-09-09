@@ -1,4 +1,4 @@
-name: Phase 0-3 Validation
+name: Phase 0-4 Validation
 
 on:
   pull_request:
@@ -33,3 +33,6 @@ jobs:
 
       - name: Test BM25 and RRF core
         run: npm run test:retrieval-core --workspace=server
+
+      - name: Test adaptive agent policy
+        run: npm run test:agent-policy --workspace=server
