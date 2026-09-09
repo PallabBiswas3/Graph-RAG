@@ -98,7 +98,6 @@ const SourcesPanel: React.FC<{ sources: SourceCitation[]; graph: GraphData }> = 
                   </span>
                   <span className="text-[10px] font-mono text-gray-500">{pct}%</span>
                 </div>
-                {/* Similarity bar */}
                 <div className="h-0.5 w-full bg-white/10 rounded-full overflow-hidden mb-1.5">
                   <div
                     className={`h-full ${barColor} rounded-full transition-all duration-500`}
@@ -179,13 +178,11 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
 
   return (
     <div className={`flex flex-col gap-1.5 ${isUser ? "items-end" : "items-start"}`}>
-      {/* Role label */}
       <span className="text-[10px] text-gray-600 px-1 font-mono uppercase tracking-widest">
         {isUser ? "you" : "graph rag"}
       </span>
 
       <div className={`max-w-[82%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1`}>
-        {/* Main bubble */}
         <div
           className={`px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isUser
               ? "bg-blue-600/90 text-white rounded-tr-sm shadow-lg shadow-blue-900/20"
@@ -198,7 +195,6 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
           )}
         </div>
 
-        {/* Confidence + metadata row */}
         {!isUser && !msg.isStreaming && (
           <div className="flex items-center gap-2 px-1">
             {msg.confidence !== undefined && (
@@ -207,14 +203,12 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
           </div>
         )}
 
-        {/* Sources */}
         {!isUser && !msg.isStreaming && msg.sources && (
           <div className="w-full">
             <SourcesPanel sources={msg.sources} graph={graph} />
           </div>
         )}
 
-        {/* Reasoning trace */}
         {!isUser && !msg.isStreaming && msg.reasoningTrace && (
           <div className="w-full">
             <ReasoningTrace trace={msg.reasoningTrace} graph={graph} />
@@ -279,12 +273,10 @@ const ChatPanel: React.FC<Props> = ({
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto scroll to bottom
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Auto resize textarea
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -300,15 +292,12 @@ const ChatPanel: React.FC<Props> = ({
     setError(null);
     setLoading(true);
 
-    // Add user message
     const userMsg: EnrichedMessage = { role: "user", content: query };
     setMessages((prev) => [...prev, userMsg]);
 
-    // Add placeholder streaming assistant message
-    const streamingId = Date.now();
     const streamingMsg: EnrichedMessage = {
       role: "assistant",
-      content: "",
+      content: "Starting grounded graph search...",
       isStreaming: true,
     };
     setMessages((prev) => [...prev, streamingMsg]);
@@ -317,7 +306,6 @@ const ChatPanel: React.FC<Props> = ({
 
     await queryGraphRAGStream(
       query,
-      // onToken
       (token) => {
         accumulated += token;
         setMessages((prev) => {
@@ -329,7 +317,6 @@ const ChatPanel: React.FC<Props> = ({
           return updated;
         });
       },
-      // onDone
       (response) => {
         setMessages((prev) => {
           const updated = [...prev];
@@ -345,11 +332,21 @@ const ChatPanel: React.FC<Props> = ({
         });
         setLoading(false);
       },
-      // onError
       (errMsg) => {
         setError(errMsg);
-        setMessages((prev) => prev.slice(0, -1)); // remove streaming placeholder
+        setMessages((prev) => prev.slice(0, -1));
         setLoading(false);
+      },
+      (status) => {
+        if (accumulated) return;
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last?.isStreaming) {
+            updated[updated.length - 1] = { ...last, content: status };
+          }
+          return updated;
+        });
       }
     );
   }, [input, loading, setMessages, setLoading]);
@@ -374,7 +371,6 @@ const ChatPanel: React.FC<Props> = ({
           boxShadow: "0 0 0 1px rgba(255,255,255,0.03), 0 32px 64px rgba(0,0,0,0.8)",
         }}
       >
-        {/* ── Header ── */}
         <div
           className="flex items-center justify-between px-5 py-3.5"
           style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}
@@ -411,7 +407,6 @@ const ChatPanel: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* ── Messages ── */}
         <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5 scroll-smooth">
           {messages.length === 0 ? (
             <EmptyState />
@@ -421,7 +416,6 @@ const ChatPanel: React.FC<Props> = ({
             ))
           )}
 
-          {/* Error banner */}
           {error && (
             <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
               <AlertCircle size={13} />
@@ -432,7 +426,6 @@ const ChatPanel: React.FC<Props> = ({
           <div ref={bottomRef} />
         </div>
 
-        {/* ── Input ── */}
         <div
           className="px-4 py-3"
           style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}

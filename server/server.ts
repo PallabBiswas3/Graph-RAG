@@ -195,11 +195,17 @@ ${text}
   }
 });
 
-async function queryAdaptiveGraphAgent(query: string) {
+async function queryAdaptiveGraphAgent(query: string, onStatus?: (status: string) => void) {
+  const totalStarted = Date.now();
+
+  onStatus?.("Retrieving and expanding graph evidence...");
+  const agentStarted = Date.now();
   const agent = await runAdaptiveAgent(query, { maxSteps: 6, maxRequeries: 1 });
   const state = agent.state;
+  console.log(`[chat] adaptive agent: ${Date.now() - agentStarted}ms`);
 
   if (agent.decision === "abstain" || !state.chunks.length) {
+    console.log(`[chat] total: ${Date.now() - totalStarted}ms (agent abstained)`);
     return {
       content: "I could not find enough source evidence in the uploaded knowledge base to answer this reliably.",
       sources: [],
@@ -209,6 +215,8 @@ async function queryAdaptiveGraphAgent(query: string) {
     };
   }
 
+  onStatus?.("Verifying retrieved claims against source chunks...");
+  const verificationStarted = Date.now();
   const verification = await runVerificationPipeline({
     originalQuery: query,
     nodes: state.nodes,
@@ -216,10 +224,12 @@ async function queryAdaptiveGraphAgent(query: string) {
     claims: state.evidenceClaims,
     maxRetries: 1,
   });
+  console.log(`[chat] verification: ${Date.now() - verificationStarted}ms`);
 
   const verificationTrace = verification.trace.map((item, index) => `verify:${index + 1} — ${item}`);
 
   if (verification.available && verification.decision === "abstain") {
+    console.log(`[chat] total: ${Date.now() - totalStarted}ms (verification abstained)`);
     return {
       content:
         "I found related material, but claim-level verification did not produce enough reliable support after the bounded retry, so I’m abstaining rather than presenting an uncertain answer.",
@@ -344,6 +354,8 @@ async function queryAdaptiveGraphAgent(query: string) {
     }),
   ];
 
+  onStatus?.("Generating grounded answer...");
+  const synthesisStarted = Date.now();
   const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
   const result = await model.generateContent(`
 You are the synthesis component of a bounded evidence-grounded graph agent with claim verification.
@@ -387,6 +399,8 @@ Rules:
 - If the remaining verified evidence is insufficient for part of the question, state that limitation.
 - Cite chunk numbers/pages in the prose whenever practical.
 `);
+  console.log(`[chat] synthesis: ${Date.now() - synthesisStarted}ms`);
+  console.log(`[chat] total: ${Date.now() - totalStarted}ms`);
 
   return {
     content: result.response.text(),
@@ -403,14 +417,26 @@ app.post("/api/chat", async (req, res) => {
   if (!query) return res.status(400).json({ message: "Query required" });
 
   res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
   const sendEvent = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  const requestStarted = Date.now();
+  console.log(`[chat] query started: ${query.slice(0, 120)}`);
+
+  sendEvent({ status: "Starting grounded graph search..." });
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) sendEvent({ heartbeat: true });
+  }, 8_000);
 
   try {
-    const { content, sources, reasoningTrace } = await queryAdaptiveGraphAgent(query);
+    const { content, sources, reasoningTrace } = await queryAdaptiveGraphAgent(query, (status) =>
+      sendEvent({ status })
+    );
+
+    sendEvent({ status: "Streaming grounded answer..." });
     for (const word of content.split(" ")) {
       sendEvent({ token: `${word} ` });
       await new Promise((resolve) => setTimeout(resolve, 12));
@@ -418,10 +444,13 @@ app.post("/api/chat", async (req, res) => {
     sendEvent({ sources, reasoningTrace });
     res.write("data: [DONE]\n\n");
     res.end();
+    console.log(`[chat] response completed: ${Date.now() - requestStarted}ms`);
   } catch (error: any) {
     console.error("Adaptive agent error:", error);
     sendEvent({ error: error.message || "Query failed" });
     res.end();
+  } finally {
+    clearInterval(heartbeat);
   }
 });
 

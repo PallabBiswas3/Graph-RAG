@@ -167,7 +167,8 @@ export const queryGraphRAGStream = async (
   query: string,
   onToken: (token: string) => void,
   onDone: (response: ChatResponse) => void,
-  onError: (error: string) => void
+  onError: (error: string) => void,
+  onStatus?: (status: string) => void
 ): Promise<void> => {
   try {
     const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -183,7 +184,9 @@ export const queryGraphRAGStream = async (
 
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/event-stream")) {
-      const reader = response.body!.getReader();
+      if (!response.body) throw new Error("Chat stream body is unavailable");
+
+      const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullContent = "";
       let sources: SourceCitation[] = [];
@@ -207,6 +210,8 @@ export const queryGraphRAGStream = async (
           try {
             const parsed = JSON.parse(data);
             if (parsed.error) throw new Error(parsed.error);
+            if (typeof parsed.status === "string") onStatus?.(parsed.status);
+            if (parsed.heartbeat) continue;
             if (parsed.token) {
               fullContent += parsed.token;
               onToken(parsed.token);
