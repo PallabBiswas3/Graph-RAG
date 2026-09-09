@@ -1,4 +1,4 @@
-name: Phase 0-4 Validation
+name: Phase 0-5 Validation
 
 on:
   pull_request:
@@ -36,3 +36,6 @@ jobs:
 
       - name: Test adaptive agent policy
         run: npm run test:agent-policy --workspace=server
+
+      - name: Test verification policy
+        run: npm run test:verification-policy --workspace=server
