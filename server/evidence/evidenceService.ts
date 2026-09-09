@@ -48,7 +48,7 @@ export async function extractAtomicClaims(content: string): Promise<ExtractedCla
   if (!apiKey) return [];
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
   const result = await model.generateContent(`
 Extract only claims explicitly stated in the source text.
 
@@ -118,7 +118,12 @@ async function resolveEntityIds(entityNames: string[], fallbackNodeId: string): 
   return [...resolved];
 }
 
-async function createClaimRelations(newClaimId: string, newClaimText: string, polarity: ExtractedClaim["polarity"], entityIds: string[]) {
+async function createClaimRelations(
+  newClaimId: string,
+  newClaimText: string,
+  polarity: ExtractedClaim["polarity"],
+  entityIds: string[]
+) {
   if (!entityIds.length) return;
 
   const { data: candidateLinks, error: linkError } = await supabase
