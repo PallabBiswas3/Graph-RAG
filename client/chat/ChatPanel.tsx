@@ -11,17 +11,20 @@ import {
   Loader2,
 } from "lucide-react";
 import { ChatMessage, GraphData } from "../types";
-import { queryGraphRAGStream, SourceCitation } from "../services/geminiService";
-
-/* =========================
-   TYPES
-========================= */
+import {
+  queryEvaluationStream,
+  SourceCitation,
+  EvaluationMode,
+  EvaluationMetadata,
+} from "../services/geminiService";
 
 interface EnrichedMessage extends ChatMessage {
   sources?: SourceCitation[];
   reasoningTrace?: string[];
   confidence?: number;
   isStreaming?: boolean;
+  mode?: EvaluationMode;
+  evaluation?: EvaluationMetadata;
 }
 
 interface Props {
@@ -33,33 +36,49 @@ interface Props {
   onClose?: () => void;
 }
 
-/* =========================
-   CONFIDENCE BADGE
-========================= */
+const MODE_LABELS: Record<EvaluationMode, string> = {
+  fixed: "Fixed GraphRAG",
+  adaptive: "Adaptive GraphRAG",
+  adaptive_verified: "Adaptive + Verifier",
+};
 
 const ConfidenceBadge: React.FC<{ score: number }> = ({ score }) => {
   const pct = Math.round(score * 100);
   const color =
-    pct >= 75 ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" :
-      pct >= 50 ? "text-amber-400 border-amber-500/30 bg-amber-500/10" :
-        "text-rose-400 border-rose-500/30 bg-rose-500/10";
+    pct >= 75
+      ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10"
+      : pct >= 50
+        ? "text-amber-400 border-amber-500/30 bg-amber-500/10"
+        : "text-rose-400 border-rose-500/30 bg-rose-500/10";
 
   return (
-    <span className={`inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full border ${color}`}>
+    <span
+      className={`inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full border ${color}`}
+    >
       <Zap size={9} />
       {pct}% confidence
     </span>
   );
 };
 
-/* =========================
-   SOURCE CITATIONS PANEL
-========================= */
+const ModeBadge: React.FC<{
+  mode: EvaluationMode;
+  evaluation?: EvaluationMetadata;
+}> = ({ mode, evaluation }) => (
+  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full border border-cyan-500/25 bg-cyan-500/8 text-cyan-300">
+    {MODE_LABELS[mode]}
+    {evaluation?.timings?.totalMs !== undefined && (
+      <span className="text-cyan-500/70">
+        · {(evaluation.timings.totalMs / 1000).toFixed(1)}s
+      </span>
+    )}
+  </span>
+);
 
-const SourcesPanel: React.FC<{ sources: SourceCitation[]; graph: GraphData }> = ({
-  sources,
-  graph,
-}) => {
+const SourcesPanel: React.FC<{
+  sources: SourceCitation[];
+  graph: GraphData;
+}> = ({ sources, graph }) => {
   const [open, setOpen] = useState(false);
 
   if (!sources || sources.length === 0) return null;
@@ -87,8 +106,11 @@ const SourcesPanel: React.FC<{ sources: SourceCitation[]; graph: GraphData }> = 
           {sources.map((src, i) => {
             const pct = Math.round(src.similarity * 100);
             const barColor =
-              pct >= 75 ? "bg-emerald-500" :
-                pct >= 50 ? "bg-amber-500" : "bg-rose-500";
+              pct >= 75
+                ? "bg-emerald-500"
+                : pct >= 50
+                  ? "bg-amber-500"
+                  : "bg-rose-500";
 
             return (
               <div key={i} className="px-3 py-2.5 bg-black/20">
@@ -96,7 +118,9 @@ const SourcesPanel: React.FC<{ sources: SourceCitation[]; graph: GraphData }> = 
                   <span className="text-xs font-medium text-gray-200 truncate max-w-[70%]">
                     {src.nodeLabel || getNodeLabel(src.nodeId)}
                   </span>
-                  <span className="text-[10px] font-mono text-gray-500">{pct}%</span>
+                  <span className="text-[10px] font-mono text-gray-500">
+                    {pct}%
+                  </span>
                 </div>
                 <div className="h-0.5 w-full bg-white/10 rounded-full overflow-hidden mb-1.5">
                   <div
@@ -118,14 +142,10 @@ const SourcesPanel: React.FC<{ sources: SourceCitation[]; graph: GraphData }> = 
   );
 };
 
-/* =========================
-   REASONING TRACE
-========================= */
-
-const ReasoningTrace: React.FC<{ trace: string[]; graph: GraphData }> = ({
-  trace,
-  graph,
-}) => {
+const ReasoningTrace: React.FC<{
+  trace: string[];
+  graph: GraphData;
+}> = ({ trace, graph }) => {
   const [open, setOpen] = useState(false);
 
   if (!trace || trace.length === 0) return null;
@@ -166,14 +186,10 @@ const ReasoningTrace: React.FC<{ trace: string[]; graph: GraphData }> = ({
   );
 };
 
-/* =========================
-   MESSAGE BUBBLE
-========================= */
-
-const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
-  msg,
-  graph,
-}) => {
+const MessageBubble: React.FC<{
+  msg: EnrichedMessage;
+  graph: GraphData;
+}> = ({ msg, graph }) => {
   const isUser = msg.role === "user";
 
   return (
@@ -182,12 +198,15 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
         {isUser ? "you" : "graph rag"}
       </span>
 
-      <div className={`max-w-[82%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1`}>
+      <div
+        className={`max-w-[82%] ${isUser ? "items-end" : "items-start"} flex flex-col gap-1`}
+      >
         <div
-          className={`px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isUser
+          className={`px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
+            isUser
               ? "bg-blue-600/90 text-white rounded-tr-sm shadow-lg shadow-blue-900/20"
               : "bg-[#141414] border border-white/8 text-gray-100 rounded-tl-sm"
-            }`}
+          }`}
         >
           {msg.content}
           {msg.isStreaming && (
@@ -196,7 +215,10 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
         </div>
 
         {!isUser && !msg.isStreaming && (
-          <div className="flex items-center gap-2 px-1">
+          <div className="flex items-center gap-2 px-1 flex-wrap">
+            {msg.mode && (
+              <ModeBadge mode={msg.mode} evaluation={msg.evaluation} />
+            )}
             {msg.confidence !== undefined && (
               <ConfidenceBadge score={msg.confidence} />
             )}
@@ -218,10 +240,6 @@ const MessageBubble: React.FC<{ msg: EnrichedMessage; graph: GraphData }> = ({
     </div>
   );
 };
-
-/* =========================
-   EMPTY STATE
-========================= */
 
 const EmptyState: React.FC = () => (
   <div className="flex flex-col items-center justify-center h-full gap-4 select-none">
@@ -256,10 +274,6 @@ const EmptyState: React.FC = () => (
   </div>
 );
 
-/* =========================
-   MAIN CHAT PANEL
-========================= */
-
 const ChatPanel: React.FC<Props> = ({
   messages,
   setMessages,
@@ -270,6 +284,7 @@ const ChatPanel: React.FC<Props> = ({
 }) => {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<EvaluationMode>("adaptive_verified");
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -288,6 +303,7 @@ const ChatPanel: React.FC<Props> = ({
     const query = input.trim();
     if (!query || loading) return;
 
+    const selectedMode = mode;
     setInput("");
     setError(null);
     setLoading(true);
@@ -297,22 +313,27 @@ const ChatPanel: React.FC<Props> = ({
 
     const streamingMsg: EnrichedMessage = {
       role: "assistant",
-      content: "Starting grounded graph search...",
+      content: `Starting ${MODE_LABELS[selectedMode]}...`,
       isStreaming: true,
+      mode: selectedMode,
     };
     setMessages((prev) => [...prev, streamingMsg]);
 
     let accumulated = "";
 
-    await queryGraphRAGStream(
+    await queryEvaluationStream(
       query,
+      selectedMode,
       (token) => {
         accumulated += token;
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
           if (last?.isStreaming) {
-            updated[updated.length - 1] = { ...last, content: accumulated };
+            updated[updated.length - 1] = {
+              ...last,
+              content: accumulated,
+            };
           }
           return updated;
         });
@@ -326,6 +347,8 @@ const ChatPanel: React.FC<Props> = ({
             sources: response.sources,
             reasoningTrace: response.reasoningTrace,
             confidence: response.confidence,
+            mode: response.mode ?? selectedMode,
+            evaluation: response.evaluation,
             isStreaming: false,
           };
           return updated;
@@ -349,7 +372,7 @@ const ChatPanel: React.FC<Props> = ({
         });
       }
     );
-  }, [input, loading, setMessages, setLoading]);
+  }, [input, loading, mode, setMessages, setLoading]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -368,7 +391,8 @@ const ChatPanel: React.FC<Props> = ({
         style={{
           background: "linear-gradient(145deg, #0d0d0d 0%, #0a0a0a 100%)",
           border: "1px solid rgba(255,255,255,0.07)",
-          boxShadow: "0 0 0 1px rgba(255,255,255,0.03), 0 32px 64px rgba(0,0,0,0.8)",
+          boxShadow:
+            "0 0 0 1px rgba(255,255,255,0.03), 0 32px 64px rgba(0,0,0,0.8)",
         }}
       >
         <div
@@ -390,6 +414,19 @@ const ChatPanel: React.FC<Props> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as EvaluationMode)}
+              disabled={loading}
+              aria-label="GraphRAG evaluation mode"
+              title="Choose the pipeline used for this question"
+              className="h-8 rounded-lg border border-cyan-500/20 bg-[#111] px-2 text-[11px] font-mono text-cyan-300 outline-none hover:border-cyan-500/40 disabled:opacity-50"
+            >
+              <option value="fixed">Fixed GraphRAG</option>
+              <option value="adaptive">Adaptive GraphRAG</option>
+              <option value="adaptive_verified">Adaptive + Verifier</option>
+            </select>
+
             {loading && (
               <div className="flex items-center gap-1.5 text-[11px] text-blue-400 font-mono">
                 <Loader2 size={11} className="animate-spin" />
@@ -443,7 +480,7 @@ const ChatPanel: React.FC<Props> = ({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               disabled={loading}
-              placeholder="Ask anything about your knowledge graph…"
+              placeholder={`Ask using ${MODE_LABELS[mode]}…`}
               rows={1}
               className="flex-1 bg-transparent text-sm text-white placeholder-gray-600 resize-none focus:outline-none py-1 leading-relaxed disabled:opacity-50"
               style={{ maxHeight: "140px", minHeight: "32px" }}
@@ -454,9 +491,10 @@ const ChatPanel: React.FC<Props> = ({
               disabled={!input.trim() || loading}
               className="mb-0.5 p-2 rounded-lg transition-all duration-200 flex-shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
               style={{
-                background: input.trim() && !loading
-                  ? "linear-gradient(135deg, #2563eb, #1d4ed8)"
-                  : "rgba(255,255,255,0.06)",
+                background:
+                  input.trim() && !loading
+                    ? "linear-gradient(135deg, #2563eb, #1d4ed8)"
+                    : "rgba(255,255,255,0.06)",
               }}
             >
               <Send size={15} className="text-white" />
@@ -464,7 +502,7 @@ const ChatPanel: React.FC<Props> = ({
           </div>
 
           <p className="text-[10px] text-gray-700 mt-2 text-center font-mono">
-            Enter ↵ to send · Shift+Enter for new line · Esc to close
+            Mode: {MODE_LABELS[mode]} · Enter ↵ to send · Shift+Enter for new line · Esc to close
           </p>
         </div>
       </div>
