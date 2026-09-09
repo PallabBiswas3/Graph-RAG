@@ -9,6 +9,7 @@
     "serve": "node dist/server.js",
     "test:metrics": "ts-node evaluation/metrics.test.ts",
     "test:retrieval-core": "ts-node evaluation/retrievalCore.test.ts",
+    "test:agent-policy": "ts-node evaluation/agentPolicy.test.ts",
     "eval:retrieval": "ts-node evaluation/runRetrievalBenchmark.ts"
   },
   "keywords": [],
