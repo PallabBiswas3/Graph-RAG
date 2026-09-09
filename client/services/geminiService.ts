@@ -3,6 +3,8 @@ import { PDFChunk } from "./pdfService";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 
+export type EvaluationMode = "fixed" | "adaptive" | "adaptive_verified";
+
 export interface SourceCitation {
   nodeId: string;
   nodeLabel: string;
@@ -14,12 +16,45 @@ export interface SourceCitation {
   chunkContent?: string;
 }
 
+export interface EvaluationMetadata {
+  abstained: boolean;
+  timings: {
+    retrievalMs?: number;
+    graphExpansionMs?: number;
+    agentMs?: number;
+    verificationMs?: number;
+    synthesisMs?: number;
+    totalMs: number;
+  };
+  counts: {
+    nodes: number;
+    chunks: number;
+    expandedEdges: number;
+    claims: number;
+    supported?: number;
+    contradicted?: number;
+    insufficient?: number;
+  };
+  toolCalls: string[];
+  verification?: {
+    available: boolean;
+    retried: boolean;
+    decision: "continue" | "abstain";
+    calibratedScore: number;
+    supported: number;
+    contradicted: number;
+    insufficient: number;
+  };
+}
+
 export interface ChatResponse {
   role: "assistant";
   content: string;
   sources?: SourceCitation[];
   reasoningTrace?: string[];
   confidence?: number;
+  mode?: EvaluationMode;
+  evaluation?: EvaluationMetadata;
 }
 
 export interface IngestionProgress {
@@ -163,6 +198,93 @@ export const ingestPDFChunks = async (
   });
 };
 
+async function consumeChatStream(
+  response: Response,
+  onToken: (token: string) => void,
+  onDone: (response: ChatResponse) => void,
+  onStatus?: (status: string) => void
+): Promise<void> {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("text/event-stream")) {
+    const data: ChatResponse = await response.json();
+    const words = data.content.split(" ");
+
+    for (const word of words) {
+      onToken(word + " ");
+      await new Promise((resolve) => setTimeout(resolve, 18));
+    }
+
+    onDone({
+      ...data,
+      confidence:
+        data.sources && data.sources.length > 0
+          ? data.sources.reduce((acc, source) => acc + source.similarity, 0) /
+            data.sources.length
+          : undefined,
+    });
+    return;
+  }
+
+  if (!response.body) throw new Error("Chat stream body is unavailable");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullContent = "";
+  let sources: SourceCitation[] = [];
+  let reasoningTrace: string[] = [];
+  let mode: EvaluationMode | undefined;
+  let evaluation: EvaluationMetadata | undefined;
+  let pending = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    pending += decoder.decode(value, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+
+      const data = line.slice(6).trim();
+      if (!data || data === "[DONE]") continue;
+
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.error) throw new Error(parsed.error);
+        if (typeof parsed.status === "string") onStatus?.(parsed.status);
+        if (parsed.heartbeat) continue;
+        if (parsed.token) {
+          fullContent += parsed.token;
+          onToken(parsed.token);
+        }
+        if (parsed.sources) sources = parsed.sources;
+        if (parsed.reasoningTrace) reasoningTrace = parsed.reasoningTrace;
+        if (parsed.mode) mode = parsed.mode;
+        if (parsed.evaluation) evaluation = parsed.evaluation;
+      } catch (error) {
+        if (error instanceof Error && data.startsWith("{")) throw error;
+        fullContent += data;
+        onToken(data);
+      }
+    }
+  }
+
+  onDone({
+    role: "assistant",
+    content: fullContent.trimEnd(),
+    sources,
+    reasoningTrace,
+    mode,
+    evaluation,
+    confidence:
+      sources.length > 0
+        ? sources.reduce((acc, source) => acc + source.similarity, 0) / sources.length
+        : undefined,
+  });
+}
+
 export const queryGraphRAGStream = async (
   query: string,
   onToken: (token: string) => void,
@@ -182,78 +304,33 @@ export const queryGraphRAGStream = async (
       throw new Error(errorData.message || "Failed to query knowledge graph");
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("text/event-stream")) {
-      if (!response.body) throw new Error("Chat stream body is unavailable");
+    await consumeChatStream(response, onToken, onDone, onStatus);
+  } catch (err: any) {
+    onError(err.message || "Unknown error");
+  }
+};
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let fullContent = "";
-      let sources: SourceCitation[] = [];
-      let reasoningTrace: string[] = [];
-      let pending = "";
+export const queryEvaluationStream = async (
+  query: string,
+  mode: EvaluationMode,
+  onToken: (token: string) => void,
+  onDone: (response: ChatResponse) => void,
+  onError: (error: string) => void,
+  onStatus?: (status: string) => void
+): Promise<void> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/evidence/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, mode }),
+    });
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        pending += decoder.decode(value, { stream: true });
-        const lines = pending.split("\n");
-        pending = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-
-          const data = line.slice(6).trim();
-          if (!data || data === "[DONE]") continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.error) throw new Error(parsed.error);
-            if (typeof parsed.status === "string") onStatus?.(parsed.status);
-            if (parsed.heartbeat) continue;
-            if (parsed.token) {
-              fullContent += parsed.token;
-              onToken(parsed.token);
-            }
-            if (parsed.sources) sources = parsed.sources;
-            if (parsed.reasoningTrace) reasoningTrace = parsed.reasoningTrace;
-          } catch (error) {
-            if (error instanceof Error && data.startsWith("{")) throw error;
-            fullContent += data;
-            onToken(data);
-          }
-        }
-      }
-
-      onDone({
-        role: "assistant",
-        content: fullContent.trimEnd(),
-        sources,
-        reasoningTrace,
-        confidence:
-          sources.length > 0
-            ? sources.reduce((acc, source) => acc + source.similarity, 0) / sources.length
-            : undefined,
-      });
-    } else {
-      const data: ChatResponse = await response.json();
-      const words = data.content.split(" ");
-
-      for (const word of words) {
-        onToken(word + " ");
-        await new Promise((resolve) => setTimeout(resolve, 18));
-      }
-
-      onDone({
-        ...data,
-        confidence:
-          data.sources && data.sources.length > 0
-            ? data.sources.reduce((acc, source) => acc + source.similarity, 0) /
-              data.sources.length
-            : undefined,
-      });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || "Failed to run evaluation mode");
     }
+
+    await consumeChatStream(response, onToken, onDone, onStatus);
   } catch (err: any) {
     onError(err.message || "Unknown error");
   }
