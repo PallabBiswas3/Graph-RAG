@@ -26,7 +26,11 @@ function rerankByQueryOverlap<T extends { similarity: number }>(
   query: string,
   textOf: (item: T) => string
 ): T[] {
-  const queryTerms = [...new Set((query.toLowerCase().match(/[a-z0-9]+/g) || []).filter((w) => w.length > 2))];
+  const queryTerms = [
+    ...new Set(
+      (query.toLowerCase().match(/[a-z0-9]+/g) || []).filter((word) => word.length > 2)
+    ),
+  ];
 
   return items
     .map((item) => {
@@ -36,6 +40,12 @@ function rerankByQueryOverlap<T extends { similarity: number }>(
       return { ...item, similarity: item.similarity * 0.8 + overlap * 0.2 };
     })
     .sort((a, b) => b.similarity - a.similarity);
+}
+
+function normalizeFusionScores<T extends { similarity: number }>(items: T[]): T[] {
+  const maxScore = Math.max(...items.map((item) => item.similarity), 0);
+  if (maxScore <= 0) return items;
+  return items.map((item) => ({ ...item, similarity: item.similarity / maxScore }));
 }
 
 export async function retrieveHybrid(query: string, candidateLimit = 20) {
@@ -57,19 +67,19 @@ export async function retrieveHybrid(query: string, candidateLimit = 20) {
   const denseNodes = (denseNodesResult.data || []).map((node: any) => ({
     id: node.id,
     score: node.similarity ?? 0,
-    value: node,
+    value: node as Record<string, unknown>,
   }));
   const denseChunks = (denseChunksResult.data || []).map((chunk: any) => ({
     id: chunk.id,
     score: chunk.similarity ?? 0,
-    value: chunk,
+    value: chunk as Record<string, unknown>,
   }));
 
   const bm25Nodes = bm25Rank(
     (allNodesResult.data || []).map((node: any) => ({
       id: node.id,
       text: `${node.label || ""} ${node.description || ""} ${node.type || ""}`,
-      value: node,
+      value: node as Record<string, unknown>,
     })),
     query,
     candidateLimit
@@ -79,38 +89,45 @@ export async function retrieveHybrid(query: string, candidateLimit = 20) {
     (allChunksResult.data || []).map((chunk: any) => ({
       id: chunk.id,
       text: chunk.content || "",
-      value: chunk,
+      value: chunk as Record<string, unknown>,
     })),
     query,
     candidateLimit
   );
 
-  const fusedNodes = reciprocalRankFusion(
+  const fusedNodes = reciprocalRankFusion<Record<string, unknown>>(
     [
       { name: "dense", items: denseNodes },
       { name: "bm25", items: bm25Nodes },
     ],
     candidateLimit
   ).map((item) => ({
-    ...item.value,
+    ...(item.value as Record<string, unknown>),
     similarity: item.score,
     retrievalSources: item.sources,
-  })) as RetrievedNode[];
+  })) as unknown as RetrievedNode[];
 
-  const fusedChunks = reciprocalRankFusion(
+  const fusedChunks = reciprocalRankFusion<Record<string, unknown>>(
     [
       { name: "dense", items: denseChunks },
       { name: "bm25", items: bm25Chunks },
     ],
     candidateLimit
   ).map((item) => ({
-    ...item.value,
+    ...(item.value as Record<string, unknown>),
     similarity: item.score,
     retrievalSources: item.sources,
-  })) as RetrievedChunk[];
+  })) as unknown as RetrievedChunk[];
+
+  const normalizedNodes = normalizeFusionScores(fusedNodes);
+  const normalizedChunks = normalizeFusionScores(fusedChunks);
 
   return {
-    nodes: rerankByQueryOverlap(fusedNodes, query, (node) => `${node.label} ${node.description}`).slice(0, 5),
-    chunks: rerankByQueryOverlap(fusedChunks, query, (chunk) => chunk.content).slice(0, 6),
+    nodes: rerankByQueryOverlap(
+      normalizedNodes,
+      query,
+      (node) => `${node.label} ${node.description}`
+    ).slice(0, 5),
+    chunks: rerankByQueryOverlap(normalizedChunks, query, (chunk) => chunk.content).slice(0, 6),
   };
 }
