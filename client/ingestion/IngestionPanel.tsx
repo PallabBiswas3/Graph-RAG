@@ -20,6 +20,7 @@ interface Props {
   onPdfLoading: (loading: boolean) => void;
   onIngestionProgress: (progress: IngestionProgress | null) => void;
   onViewChange: (view: View) => void;
+  onGraphReady?: () => Promise<void> | void;
 }
 
 type Mode = "text" | "pdf";
@@ -31,6 +32,7 @@ const IngestionPanel: React.FC<Props> = ({
   onPdfLoading,
   onIngestionProgress,
   onViewChange,
+  onGraphReady,
 }) => {
   const [mode, setMode] = useState<Mode>("text");
   const [text, setText] = useState("");
@@ -42,7 +44,6 @@ const IngestionPanel: React.FC<Props> = ({
 
   const isLoading = loading || pdfLoading;
 
-  /* ── PDF file handling ── */
   const handleFile = useCallback((file: File) => {
     setError(null);
     setDone(false);
@@ -63,14 +64,12 @@ const IngestionPanel: React.FC<Props> = ({
     [handleFile]
   );
 
-  /* ── Text submit ── */
   const handleTextSubmit = useCallback(() => {
     if (!text.trim() || isLoading) return;
     setError(null);
     onSubmit(text.trim());
   }, [text, isLoading, onSubmit]);
 
-  /* ── PDF full pipeline ── */
   const handlePdfSubmit = useCallback(async () => {
     if (!pdfFile || isLoading) return;
     setError(null);
@@ -78,56 +77,53 @@ const IngestionPanel: React.FC<Props> = ({
     onPdfLoading(true);
 
     try {
-      // 1️⃣ Chunk the PDF
       onIngestionProgress({
-        total: 1, current: 0,
+        total: 1,
+        current: 0,
         status: "chunking",
         message: `Chunking ${pdfFile.name}…`,
       });
 
       const { fullText, chunks, sourceDocId } = await extractChunksFromPDF(pdfFile);
 
-      // 2️⃣ Extract knowledge graph from full text
       onIngestionProgress({
-        total: chunks.length, current: 0,
+        total: chunks.length,
+        current: 0,
         status: "extracting",
         message: "Extracting knowledge graph…",
       });
 
+      // Extract exactly once. The previous flow extracted here and then called
+      // onSubmit(fullText), which triggered a second graph extraction in App.
       const graph = await extractKnowledgeGraph(fullText, sourceDocId);
 
-      // Use the first node's id as the anchor for chunks
-      // (in production you'd map chunks to relevant nodes)
-      const anchorNodeId =
-        graph.nodes[0]?.id.toLowerCase().replace(/\s+/g, "") ?? "root";
+      // Preserve evidence provenance by linking each PDF chunk to the most
+      // relevant extracted node instead of attaching every chunk to node[0].
+      await ingestPDFChunks(chunks, graph, sourceDocId, onIngestionProgress);
 
-      // 3️⃣ Ingest chunks with embeddings
-      await ingestPDFChunks(chunks, anchorNodeId, sourceDocId, (progress) => {
-        onIngestionProgress(progress);
-      });
-
-      // 4️⃣ Notify parent (updates graph view)
-      onSubmit(fullText, sourceDocId);
+      await onGraphReady?.();
       setDone(true);
-
-      // Navigate to graph after short delay
-      setTimeout(() => onViewChange("graph"), 1200);
+      setTimeout(() => onViewChange("graph"), 600);
     } catch (err: any) {
       console.error("PDF ingestion failed:", err);
       setError(err.message || "PDF ingestion failed. Please try again.");
       onIngestionProgress({
-        total: 1, current: 0,
+        total: 1,
+        current: 0,
         status: "error",
         message: "Ingestion failed",
       });
     } finally {
       onPdfLoading(false);
     }
-  }, [pdfFile, isLoading, onPdfLoading, onIngestionProgress, onSubmit, onViewChange]);
-
-  /* =========================
-     RENDER
-  ========================= */
+  }, [
+    pdfFile,
+    isLoading,
+    onPdfLoading,
+    onIngestionProgress,
+    onGraphReady,
+    onViewChange,
+  ]);
 
   return (
     <div
@@ -135,7 +131,6 @@ const IngestionPanel: React.FC<Props> = ({
       style={{ background: "#050508" }}
     >
       <div className="w-full max-w-2xl">
-        {/* Title */}
         <div className="mb-8 text-center">
           <h2
             className="text-2xl font-bold mb-1.5"
@@ -148,7 +143,6 @@ const IngestionPanel: React.FC<Props> = ({
           </p>
         </div>
 
-        {/* Mode toggle */}
         <div
           className="flex rounded-xl p-1 mb-6 mx-auto w-fit"
           style={{ background: "#0d0d14", border: "1px solid rgba(255,255,255,0.06)" }}
@@ -156,11 +150,17 @@ const IngestionPanel: React.FC<Props> = ({
           {(["text", "pdf"] as Mode[]).map((m) => (
             <button
               key={m}
-              onClick={() => { setMode(m); setError(null); setDone(false); }}
+              onClick={() => {
+                setMode(m);
+                setError(null);
+                setDone(false);
+              }}
               className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-mono transition-all duration-200"
               style={{
                 background: mode === m ? "rgba(6,182,212,0.12)" : "transparent",
-                border: mode === m ? "1px solid rgba(6,182,212,0.25)" : "1px solid transparent",
+                border: mode === m
+                  ? "1px solid rgba(6,182,212,0.25)"
+                  : "1px solid transparent",
                 color: mode === m ? "#22d3ee" : "#475569",
               }}
             >
@@ -170,7 +170,6 @@ const IngestionPanel: React.FC<Props> = ({
           ))}
         </div>
 
-        {/* Panel */}
         <div
           className="rounded-2xl overflow-hidden"
           style={{
@@ -180,7 +179,6 @@ const IngestionPanel: React.FC<Props> = ({
           }}
         >
           {mode === "text" ? (
-            /* ── Text mode ── */
             <div className="p-6">
               <textarea
                 value={text}
@@ -210,31 +208,36 @@ const IngestionPanel: React.FC<Props> = ({
               </div>
             </div>
           ) : (
-            /* ── PDF mode ── */
             <div className="p-6">
               {!pdfFile ? (
-                /* Drop zone */
                 <div
-                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOver(true);
+                  }}
                   onDragLeave={() => setDragOver(false)}
                   onDrop={handleDrop}
                   onClick={() => fileInputRef.current?.click()}
                   className="h-48 rounded-xl flex flex-col items-center justify-center gap-3 cursor-pointer transition-all duration-200"
                   style={{
-                    border: `2px dashed ${dragOver ? "rgba(6,182,212,0.5)" : "rgba(255,255,255,0.07)"}`,
+                    border: `2px dashed ${
+                      dragOver ? "rgba(6,182,212,0.5)" : "rgba(255,255,255,0.07)"
+                    }`,
                     background: dragOver ? "rgba(6,182,212,0.04)" : "transparent",
                   }}
                 >
                   <div
                     className="w-12 h-12 rounded-xl flex items-center justify-center"
-                    style={{ background: "rgba(6,182,212,0.08)", border: "1px solid rgba(6,182,212,0.15)" }}
+                    style={{
+                      background: "rgba(6,182,212,0.08)",
+                      border: "1px solid rgba(6,182,212,0.15)",
+                    }}
                   >
                     <Upload size={20} style={{ color: "#06b6d4" }} />
                   </div>
                   <div className="text-center">
                     <p className="text-sm font-mono" style={{ color: "#475569" }}>
-                      Drop a PDF here or{" "}
-                      <span style={{ color: "#06b6d4" }}>browse</span>
+                      Drop a PDF here or <span style={{ color: "#06b6d4" }}>browse</span>
                     </p>
                     <p className="text-[11px] mt-1" style={{ color: "#1e293b" }}>
                       Max 10 MB · PDF only
@@ -249,11 +252,13 @@ const IngestionPanel: React.FC<Props> = ({
                   />
                 </div>
               ) : (
-                /* File selected */
                 <div>
                   <div
                     className="flex items-center gap-3 p-3 rounded-xl mb-4"
-                    style={{ background: "rgba(6,182,212,0.06)", border: "1px solid rgba(6,182,212,0.15)" }}
+                    style={{
+                      background: "rgba(6,182,212,0.06)",
+                      border: "1px solid rgba(6,182,212,0.15)",
+                    }}
                   >
                     <FileText size={18} style={{ color: "#06b6d4" }} />
                     <div className="flex-1 min-w-0">
@@ -266,11 +271,13 @@ const IngestionPanel: React.FC<Props> = ({
                     </div>
                     {!isLoading && (
                       <button
-                        onClick={() => { setPdfFile(null); setDone(false); setError(null); }}
+                        onClick={() => {
+                          setPdfFile(null);
+                          setDone(false);
+                          setError(null);
+                        }}
                         className="p-1 rounded-lg transition-colors"
                         style={{ color: "#334155" }}
-                        onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = "#94a3b8")}
-                        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = "#334155")}
                       >
                         <X size={14} />
                       </button>
@@ -292,42 +299,54 @@ const IngestionPanel: React.FC<Props> = ({
           )}
         </div>
 
-        {/* Error */}
         {error && (
           <div
             className="mt-4 flex items-start gap-2.5 px-4 py-3 rounded-xl text-sm"
-            style={{ background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)", color: "#f87171" }}
+            style={{
+              background: "rgba(239,68,68,0.06)",
+              border: "1px solid rgba(239,68,68,0.15)",
+              color: "#f87171",
+            }}
           >
             <AlertCircle size={15} className="shrink-0 mt-0.5" />
             {error}
           </div>
         )}
 
-        {/* Done */}
         {done && !error && (
           <div
             className="mt-4 flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"
-            style={{ background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.15)", color: "#34d399" }}
+            style={{
+              background: "rgba(52,211,153,0.06)",
+              border: "1px solid rgba(52,211,153,0.15)",
+              color: "#34d399",
+            }}
           >
             <CheckCircle size={15} />
             PDF ingested successfully — navigating to graph…
           </div>
         )}
 
-        {/* Tips */}
         <div className="mt-6 grid grid-cols-3 gap-3">
           {[
             { icon: "◈", tip: "Sliding window chunking for better RAG recall" },
             { icon: "◉", tip: "Embeddings stored per chunk for precise retrieval" },
-            { icon: "◌", tip: "Graph nodes linked to source document for tracing" },
+            { icon: "◌", tip: "Chunks linked to evidence-relevant graph nodes" },
           ].map(({ icon, tip }) => (
             <div
               key={tip}
               className="p-3 rounded-xl text-center"
-              style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}
+              style={{
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.04)",
+              }}
             >
-              <div className="text-lg mb-1.5" style={{ color: "#1e293b" }}>{icon}</div>
-              <p className="text-[10px] leading-relaxed" style={{ color: "#1e293b" }}>{tip}</p>
+              <div className="text-lg mb-1.5" style={{ color: "#1e293b" }}>
+                {icon}
+              </div>
+              <p className="text-[10px] leading-relaxed" style={{ color: "#1e293b" }}>
+                {tip}
+              </p>
             </div>
           ))}
         </div>
@@ -336,7 +355,6 @@ const IngestionPanel: React.FC<Props> = ({
   );
 };
 
-/* ── Submit button ── */
 const SubmitButton: React.FC<{
   onClick: () => void;
   disabled: boolean;

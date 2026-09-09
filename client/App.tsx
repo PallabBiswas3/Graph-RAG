@@ -20,10 +20,6 @@ import {
   IngestionProgress,
 } from "./types";
 
-/* =========================
-   STATE
-========================= */
-
 interface AppState {
   view: View;
   graph: GraphData;
@@ -72,18 +68,17 @@ function reducer(state: AppState, action: Action): AppState {
   }
 }
 
-/* =========================
-   APP
-========================= */
-
 const App: React.FC = () => {
   const [state, dispatch] = useReducer(reducer, initialState);
 
-  useEffect(() => {
-    fetchGraphData()
-      .then((graph) => dispatch({ type: "SET_GRAPH", payload: graph }))
-      .catch(console.error);
+  const refreshGraph = useCallback(async () => {
+    const graph = await fetchGraphData();
+    dispatch({ type: "SET_GRAPH", payload: graph });
   }, []);
+
+  useEffect(() => {
+    refreshGraph().catch(console.error);
+  }, [refreshGraph]);
 
   const handleViewChange = useCallback((view: View) => {
     dispatch({ type: "SET_VIEW", payload: view });
@@ -127,28 +122,23 @@ const App: React.FC = () => {
 
   const handleClearGraph = useCallback(async () => {
     await clearGraphData();
-    const empty = await fetchGraphData();
-    dispatch({ type: "SET_GRAPH", payload: empty });
+    await refreshGraph();
     dispatch({ type: "CLEAR_MESSAGES" });
     dispatch({ type: "SET_SELECTED_NODE", payload: null });
     dispatch({ type: "SET_INGESTION_PROGRESS", payload: null });
-  }, []);
+  }, [refreshGraph]);
 
-  // typed as React.Dispatch<SetStateAction<ChatMessage[]>> to match ChatPanel props
   const setMessages = useCallback(
     (action: React.SetStateAction<ChatMessage[]>) => {
-      const next =
-        typeof action === "function" ? action(state.messages) : action;
+      const next = typeof action === "function" ? action(state.messages) : action;
       dispatch({ type: "SET_MESSAGES", payload: next });
     },
     [state.messages]
   ) as React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 
-  // typed as React.Dispatch<SetStateAction<boolean>> to match ChatPanel props
   const setRagLoading = useCallback(
     (action: React.SetStateAction<boolean>) => {
-      const next =
-        typeof action === "function" ? action(state.loading.rag) : action;
+      const next = typeof action === "function" ? action(state.loading.rag) : action;
       dispatch({ type: "SET_LOADING", payload: { rag: next } });
     },
     [state.loading.rag]
@@ -184,6 +174,7 @@ const App: React.FC = () => {
               onPdfLoading={handlePdfLoading}
               onIngestionProgress={handleIngestionProgress}
               onViewChange={handleViewChange}
+              onGraphReady={refreshGraph}
             />
           )}
 

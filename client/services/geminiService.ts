@@ -1,16 +1,16 @@
 import { ExtractionResult, GraphData, ChatMessage } from "../types";
 import { PDFChunk } from "./pdfService";
 
-const API_BASE_URL = "http://localhost:3000";
-
-/* =========================
-   TYPES
-========================= */
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
 
 export interface SourceCitation {
   nodeId: string;
   nodeLabel: string;
   similarity: number;
+  chunkId?: string;
+  sourceDocId?: string;
+  pageStart?: number;
+  pageEnd?: number;
   chunkContent?: string;
 }
 
@@ -28,10 +28,6 @@ export interface IngestionProgress {
   status: "extracting" | "chunking" | "embedding" | "done" | "error";
   message: string;
 }
-
-/* =========================
-   EXTRACT KNOWLEDGE GRAPH
-========================= */
 
 export const extractKnowledgeGraph = async (
   text: string,
@@ -51,33 +47,80 @@ export const extractKnowledgeGraph = async (
   return response.json();
 };
 
-/* =========================
-   INGEST PDF CHUNKS INTO SUPABASE
-========================= */
+const normalizeNodeId = (id: string): string => id.toLowerCase().replace(/\s+/g, "");
+
+const tokenize = (text: string): Set<string> =>
+  new Set(
+    (text.toLowerCase().match(/[a-z0-9]+/g) || []).filter((token) => token.length > 2)
+  );
+
+export const selectAnchorNodeId = (chunk: PDFChunk, graph: GraphData): string | null => {
+  if (!graph.nodes.length) return null;
+
+  const chunkText = chunk.content.toLowerCase();
+  const chunkTerms = tokenize(chunk.content);
+
+  let bestNode = graph.nodes[0];
+  let bestScore = -1;
+
+  for (const node of graph.nodes) {
+    const nodeTerms = tokenize(`${node.label} ${node.description || ""}`);
+    let overlap = 0;
+
+    for (const term of nodeTerms) {
+      if (chunkTerms.has(term)) overlap += 1;
+    }
+
+    const normalizedLabel = node.label.trim().toLowerCase();
+    const labelBonus = normalizedLabel.length >= 3 && chunkText.includes(normalizedLabel) ? 3 : 0;
+    const confidenceBonus = (node.confidence ?? 0) * 0.05;
+    const score = overlap + labelBonus + confidenceBonus;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestNode = node;
+    }
+  }
+
+  return normalizeNodeId(bestNode.id);
+};
 
 export const ingestPDFChunks = async (
   chunks: PDFChunk[],
-  nodeId: string,
+  graph: GraphData,
   sourceDocId: string,
   onProgress?: (progress: IngestionProgress) => void
 ): Promise<void> => {
   const total = chunks.length;
 
+  if (!graph.nodes.length) {
+    throw new Error("Knowledge graph extraction produced no nodes; chunks cannot be linked safely.");
+  }
+
+  let failures = 0;
+  let evidenceDeferred = 0;
+
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
+    const anchorNodeId = selectAnchorNodeId(chunk, graph);
+
+    if (!anchorNodeId) {
+      failures += 1;
+      continue;
+    }
 
     onProgress?.({
       total,
       current: i + 1,
       status: "embedding",
-      message: `Embedding chunk ${i + 1} of ${total} (pages ${chunk.pageStart}–${chunk.pageEnd})`,
+      message: `Embedding and grounding chunk ${i + 1} of ${total} (pages ${chunk.pageStart}–${chunk.pageEnd})`,
     });
 
-    const response = await fetch(`${API_BASE_URL}/api/chunks/insert`, {
+    const response = await fetch(`${API_BASE_URL}/api/evidence/chunks/insert`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        node_id: nodeId,
+        node_id: anchorNodeId,
         content: chunk.content,
         chunk_index: chunk.chunkIndex,
         source_url: sourceDocId,
@@ -85,29 +128,40 @@ export const ingestPDFChunks = async (
           ...chunk.metadata,
           pageStart: chunk.pageStart,
           pageEnd: chunk.pageEnd,
+          sourceDocId,
+          anchorStrategy: "lexical-node-evidence-v1",
         },
       }),
     });
 
     if (!response.ok) {
+      failures += 1;
       console.error(`Failed to insert chunk ${i + 1}`);
+    } else {
+      const result = await response.json();
+      if (result.evidenceStatus === "deferred") {
+        evidenceDeferred += 1;
+        console.warn(`Evidence extraction deferred for chunk ${i + 1}:`, result.evidenceWarning);
+      }
     }
 
-    // Rate limit protection between chunk insertions
-    await new Promise((r) => setTimeout(r, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+
+  if (failures > 0) {
+    throw new Error(`${failures} of ${total} chunks failed to ingest.`);
   }
 
   onProgress?.({
     total,
     current: total,
     status: "done",
-    message: `All ${total} chunks ingested successfully`,
+    message:
+      evidenceDeferred > 0
+        ? `${total} chunks ingested; evidence deferred for ${evidenceDeferred} until the Phase 3 migration/service is available`
+        : `All ${total} chunks ingested with evidence provenance`,
   });
 };
-
-/* =========================
-   QUERY GRAPH (RAG) — WITH STREAMING
-========================= */
 
 export const queryGraphRAGStream = async (
   query: string,
@@ -127,79 +181,78 @@ export const queryGraphRAGStream = async (
       throw new Error(errorData.message || "Failed to query knowledge graph");
     }
 
-    // Check if server supports streaming
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/event-stream")) {
-      // SSE streaming path
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let fullContent = "";
       let sources: SourceCitation[] = [];
       let reasoningTrace: string[] = [];
+      let pending = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
+        pending += decoder.decode(value, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop() || "";
 
         for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") continue;
+          if (!line.startsWith("data: ")) continue;
 
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.token) {
-                fullContent += parsed.token;
-                onToken(parsed.token);
-              }
-              if (parsed.sources) sources = parsed.sources;
-              if (parsed.reasoningTrace) reasoningTrace = parsed.reasoningTrace;
-            } catch {
-              // Plain text token
-              fullContent += data;
-              onToken(data);
+          const data = line.slice(6).trim();
+          if (!data || data === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) throw new Error(parsed.error);
+            if (parsed.token) {
+              fullContent += parsed.token;
+              onToken(parsed.token);
             }
+            if (parsed.sources) sources = parsed.sources;
+            if (parsed.reasoningTrace) reasoningTrace = parsed.reasoningTrace;
+          } catch (error) {
+            if (error instanceof Error && data.startsWith("{")) throw error;
+            fullContent += data;
+            onToken(data);
           }
         }
       }
 
       onDone({
         role: "assistant",
-        content: fullContent,
+        content: fullContent.trimEnd(),
         sources,
         reasoningTrace,
-        confidence: sources.length > 0
-          ? sources.reduce((acc, s) => acc + s.similarity, 0) / sources.length
-          : undefined,
+        confidence:
+          sources.length > 0
+            ? sources.reduce((acc, source) => acc + source.similarity, 0) / sources.length
+            : undefined,
       });
     } else {
-      // Non-streaming fallback — simulate streaming by revealing words progressively
       const data: ChatResponse = await response.json();
       const words = data.content.split(" ");
 
       for (const word of words) {
         onToken(word + " ");
-        await new Promise((r) => setTimeout(r, 18));
+        await new Promise((resolve) => setTimeout(resolve, 18));
       }
 
       onDone({
         ...data,
-        confidence: data.sources && data.sources.length > 0
-          ? data.sources.reduce((acc, s) => acc + s.similarity, 0) / data.sources.length
-          : undefined,
+        confidence:
+          data.sources && data.sources.length > 0
+            ? data.sources.reduce((acc, source) => acc + source.similarity, 0) /
+              data.sources.length
+            : undefined,
       });
     }
   } catch (err: any) {
     onError(err.message || "Unknown error");
   }
 };
-
-/* =========================
-   QUERY GRAPH (RAG) — STANDARD
-========================= */
 
 export const queryGraphRAG = async (query: string): Promise<ChatMessage> => {
   const response = await fetch(`${API_BASE_URL}/api/chat`, {
@@ -216,19 +269,11 @@ export const queryGraphRAG = async (query: string): Promise<ChatMessage> => {
   return response.json();
 };
 
-/* =========================
-   FETCH GRAPH DATA
-========================= */
-
 export const fetchGraphData = async (): Promise<GraphData> => {
   const response = await fetch(`${API_BASE_URL}/api/graph`);
   if (!response.ok) throw new Error("Failed to fetch graph data");
   return response.json();
 };
-
-/* =========================
-   CLEAR GRAPH DATA
-========================= */
 
 export const clearGraphData = async (): Promise<void> => {
   const response = await fetch(`${API_BASE_URL}/api/graph/clear`, {

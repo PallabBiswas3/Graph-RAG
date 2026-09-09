@@ -1,17 +1,21 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { supabase } from "./supabase";
 import { generateEmbedding } from "./embedding";
-import path from "path";
+import evidenceRouter from "./evidence/evidenceRouter";
+import { runAdaptiveAgent } from "./agent/adaptiveAgent";
+import { runVerificationPipeline } from "./verification/verificationPipeline";
 
-dotenv.config({ path: path.resolve(__dirname, "..", "../../env") });
+dotenv.config({ path: path.resolve(process.cwd(), "server", ".env") });
+dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+
 if (!GOOGLE_API_KEY) {
   console.error("GOOGLE_API_KEY is not set.");
   process.exit(1);
@@ -20,11 +24,8 @@ if (!GOOGLE_API_KEY) {
 const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
 app.use(cors());
-app.use(express.json());
-
-/* =========================
-   TYPES
-========================= */
+app.use(express.json({ limit: "10mb" }));
+app.use("/api/evidence", evidenceRouter);
 
 interface Node {
   id: string;
@@ -50,171 +51,64 @@ interface GraphData {
   links: Link[];
 }
 
-interface MatchedNode {
-  id: string;
-  label: string;
-  description: string;
-  similarity: number;
-}
-
-interface MatchedChunk {
-  id: string;
-  node_id: string;
-  content: string;
-  similarity: number;
-  metadata: Record<string, unknown>;
-}
-
-interface SubgraphEdge {
-  source: string;
-  target: string;
-  relationship: string;
-  depth: number;
-}
-
 interface SourceCitation {
   nodeId: string;
   nodeLabel: string;
   similarity: number;
+  chunkId?: string;
+  sourceDocId?: string;
+  pageStart?: number;
+  pageEnd?: number;
   chunkContent?: string;
 }
 
-/* =========================
-   DATABASE READ
-========================= */
-
 const readGraphData = async () => {
-  const { data: nodes } = await supabase.from("nodes").select("*");
-  const { data: links } = await supabase.from("links").select("*");
+  const [{ data: nodes, error: nodesError }, { data: links, error: linksError }] = await Promise.all([
+    supabase.from("nodes").select("*"),
+    supabase.from("links").select("*"),
+  ]);
+  if (nodesError) throw nodesError;
+  if (linksError) throw linksError;
   return { nodes: nodes || [], links: links || [] };
 };
 
-/* =========================
-   HYBRID SEARCH HELPER
-   Combines pgvector cosine similarity + Postgres full-text search
-========================= */
+async function insertChunk({
+  nodeId,
+  content,
+  chunkIndex = 0,
+  metadata = {},
+  sourceDocId,
+}: {
+  nodeId: string;
+  content: string;
+  chunkIndex?: number;
+  metadata?: Record<string, unknown>;
+  sourceDocId?: string;
+}) {
+  const embedding = await generateEmbedding(content);
+  if (!embedding) throw new Error(`No embedding generated for chunk linked to ${nodeId}`);
 
-async function hybridSearchNodes(
-  queryEmbedding: number[],
-  queryText: string,
-  limit = 8
-): Promise<MatchedNode[]> {
-  // 1️⃣ Vector search
-  const { data: vectorResults } = await supabase.rpc("match_nodes", {
-    query_embedding: queryEmbedding,
-    match_count: limit,
+  const { error } = await supabase.from("chunks").insert({
+    node_id: nodeId,
+    content,
+    embedding: `[${embedding.join(",")}]`,
+    chunk_index: chunkIndex,
+    source_url: sourceDocId ?? null,
+    metadata,
   });
-
-  // 2️⃣ Full-text keyword search
-  const { data: textResults } = await supabase
-    .from("nodes")
-    .select("id, label, description, type")
-    .or(
-      `label.ilike.%${queryText}%,description.ilike.%${queryText}%,type.ilike.%${queryText}%`
-    )
-    .limit(limit);
-
-  // 3️⃣ Merge and deduplicate — boost nodes found by BOTH methods
-  const vectorMap = new Map<string, MatchedNode>(
-    (vectorResults || []).map((n: MatchedNode) => [n.id, n])
-  );
-
-  const merged = new Map<string, MatchedNode>(vectorMap);
-
-  for (const n of textResults || []) {
-    if (merged.has(n.id)) {
-      // Boost similarity for nodes found in both searches
-      const existing = merged.get(n.id)!;
-      merged.set(n.id, { ...existing, similarity: Math.min(existing.similarity + 0.15, 1.0) });
-    } else {
-      merged.set(n.id, { ...n, similarity: 0.5 }); // baseline for text-only hits
-    }
-  }
-
-  // Sort by final similarity descending
-  return Array.from(merged.values()).sort((a, b) => b.similarity - a.similarity).slice(0, limit);
+  if (error) throw error;
 }
-
-async function hybridSearchChunks(
-  queryEmbedding: number[],
-  queryText: string,
-  limit = 8
-): Promise<MatchedChunk[]> {
-  // 1️⃣ Vector search over chunks
-  const { data: vectorResults } = await supabase.rpc("match_chunks", {
-    query_embedding: queryEmbedding,
-    match_count: limit,
-  });
-
-  // 2️⃣ Full-text keyword search over chunks
-  const { data: textResults } = await supabase
-    .from("chunks")
-    .select("id, node_id, content, metadata")
-    .ilike("content", `%${queryText}%`)
-    .limit(limit);
-
-  const vectorMap = new Map<string, MatchedChunk>(
-    (vectorResults || []).map((c: MatchedChunk) => [c.id, c])
-  );
-
-  const merged = new Map<string, MatchedChunk>(vectorMap);
-
-  for (const c of textResults || []) {
-    if (merged.has(c.id)) {
-      const existing = merged.get(c.id)!;
-      merged.set(c.id, { ...existing, similarity: Math.min(existing.similarity + 0.15, 1.0) });
-    } else {
-      merged.set(c.id, { ...c, similarity: 0.5 });
-    }
-  }
-
-  return Array.from(merged.values()).sort((a, b) => b.similarity - a.similarity).slice(0, limit);
-}
-
-/* =========================
-   RERANKER
-   Scores chunks/nodes by query term overlap as a lightweight cross-encoder proxy
-========================= */
-
-function rerankByTermOverlap<T extends { content?: string; description?: string; similarity: number }>(
-  items: T[],
-  query: string
-): T[] {
-  const queryTerms = query.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-
-  return items
-    .map((item) => {
-      const text = (item.content || item.description || "").toLowerCase();
-      const matchCount = queryTerms.filter((term) => text.includes(term)).length;
-      const termBoost = matchCount / Math.max(queryTerms.length, 1);
-      return { ...item, similarity: item.similarity * 0.7 + termBoost * 0.3 };
-    })
-    .sort((a, b) => b.similarity - a.similarity);
-}
-
-/* =========================
-   INSERT GRAPH
-========================= */
 
 async function insertGraph(graph: GraphData, sourceDocId?: string) {
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
   let successCount = 0;
 
   for (const node of graph.nodes) {
     try {
-      await sleep(1500);
-
       const embeddingText = `${node.label} (${node.type}): ${node.description}`;
       const embedding = await generateEmbedding(embeddingText);
-
-      if (!embedding) {
-        console.error("❌ No embedding for:", node.label);
-        continue;
-      }
+      if (!embedding) continue;
 
       const formattedId = node.id.toLowerCase().replace(/\s+/g, "");
-
       const { error } = await supabase.from("nodes").upsert({
         id: formattedId,
         label: node.label,
@@ -225,15 +119,9 @@ async function insertGraph(graph: GraphData, sourceDocId?: string) {
         source_doc_id: sourceDocId ?? node.source_doc_id ?? null,
         confidence: node.confidence ?? 1.0,
       });
+      if (error) throw error;
 
-      if (error) {
-        console.error("❌ Node insert error:", error);
-        continue;
-      }
-
-      successCount++;
-
-      // Auto-insert description as a chunk
+      successCount += 1;
       await insertChunk({
         nodeId: formattedId,
         content: node.description,
@@ -241,81 +129,33 @@ async function insertGraph(graph: GraphData, sourceDocId?: string) {
         metadata: { label: node.label, type: node.type, auto: true },
         sourceDocId,
       });
-    } catch (err) {
-      console.error("❌ Failed for:", node.label, err);
+    } catch (error) {
+      console.error("Node persistence failed:", node.label, error);
     }
   }
 
   if (successCount > 0 && graph.links?.length) {
-    const formattedLinks = graph.links.map((l) => ({
-      source: l.source.toLowerCase().replace(/\s+/g, ""),
-      target: l.target.toLowerCase().replace(/\s+/g, ""),
-      relationship: l.relationship,
-      type: l.type,
-      reason: l.reason,
-      weight: l.weight ?? 1.0,
+    const formattedLinks = graph.links.map((link) => ({
+      source: link.source.toLowerCase().replace(/\s+/g, ""),
+      target: link.target.toLowerCase().replace(/\s+/g, ""),
+      relationship: link.relationship,
+      type: link.type,
+      reason: link.reason,
+      weight: link.weight ?? 1.0,
     }));
-
     const { error } = await supabase.from("links").insert(formattedLinks);
-    if (error) console.error("❌ Link insert error:", error);
-    else console.log("✅ Links inserted");
+    if (error) throw error;
   }
 }
 
-/* =========================
-   INSERT CHUNK HELPER
-========================= */
-
-interface InsertChunkOptions {
-  nodeId: string;
-  content: string;
-  chunkIndex?: number;
-  metadata?: Record<string, unknown>;
-  sourceDocId?: string;
-}
-
-async function insertChunk({
-  nodeId,
-  content,
-  chunkIndex = 0,
-  metadata = {},
-  sourceDocId,
-}: InsertChunkOptions) {
-  try {
-    const embedding = await generateEmbedding(content);
-    if (!embedding) return;
-
-    const { error } = await supabase.from("chunks").insert({
-      node_id: nodeId,
-      content,
-      embedding: `[${embedding.join(",")}]`,
-      chunk_index: chunkIndex,
-      source_url: sourceDocId ?? null,
-      metadata,
-    });
-
-    if (error) console.error("❌ Chunk insert error:", error);
-    else console.log(`✅ Chunk inserted for node: ${nodeId}`);
-  } catch (err) {
-    console.error("❌ Chunk embedding failed:", nodeId, err);
-  }
-}
-
-/* =========================
-   GRAPH FETCH
-========================= */
-
-app.get("/api/graph", async (req, res) => {
+app.get("/api/graph", async (_req, res) => {
   try {
     res.json(await readGraphData());
-  } catch {
+  } catch (error) {
+    console.error("Graph fetch failed:", error);
     res.status(500).json({ message: "Failed to retrieve graph data" });
   }
 });
-
-/* =========================
-   GRAPH EXTRACTION
-========================= */
 
 app.post("/api/graph/extract", async (req, res) => {
   const { text, source_doc_id } = req.body;
@@ -323,35 +163,30 @@ app.post("/api/graph/extract", async (req, res) => {
 
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const result = await model.generateContent(`
+Extract a structured technical knowledge graph from the text below.
 
-    const prompt = `
-      Extract a structured technical knowledge graph from the text below.
+For every NODE include:
+- "id": unique identifier (lowercase, no spaces)
+- "label": entity name
+- "type": category
+- "description": concise technical explanation
 
-      For every NODE include:
-      - "id": unique identifier (lowercase, no spaces)
-      - "label": entity name
-      - "type": category (e.g. Tool, Concept, Language, Person, Method)
-      - "description": concise technical explanation
+For every LINK include:
+- "source": id of starting node
+- "target": id of ending node
+- "relationship": verb describing the relation
+- "type": connection category
+- "reason": brief explanation
 
-      For every LINK include:
-      - "source": id of starting node
-      - "target": id of ending node
-      - "relationship": verb (e.g. "implements", "extends", "uses")
-      - "type": connection category (e.g. dependency, hierarchy)
-      - "reason": brief explanation of the connection
+Return ONLY valid JSON: { "nodes": [], "links": [] }
 
-      Return ONLY valid JSON: { "nodes": [], "links": [] }
+TEXT:
+${text}
+`);
 
-      TEXT:
-      ${text}
-    `;
-
-    const result = await model.generateContent(prompt);
     const raw = result.response.text();
-    const parsedGraph: GraphData = raw.startsWith("```")
-      ? JSON.parse(raw.replace(/```json|```/g, "").trim())
-      : JSON.parse(raw);
-
+    const parsedGraph: GraphData = JSON.parse(raw.replace(/```json|```/g, "").trim());
     await insertGraph(parsedGraph, source_doc_id);
     res.json(parsedGraph);
   } catch (error) {
@@ -360,102 +195,169 @@ app.post("/api/graph/extract", async (req, res) => {
   }
 });
 
-/* =========================
-   GRAPH RAG CORE
-========================= */
+async function queryAdaptiveGraphAgent(query: string) {
+  const agent = await runAdaptiveAgent(query, { maxSteps: 6, maxRequeries: 1 });
+  const state = agent.state;
 
-async function queryGraphRAG(query: string) {
-  const queryEmbedding = await generateEmbedding(query);
-  if (!queryEmbedding) throw new Error("Failed to generate query embedding");
-
-  // 1️⃣ Hybrid search — nodes + chunks
-  const [rawNodes, rawChunks] = await Promise.all([
-    hybridSearchNodes(queryEmbedding, query, 8),
-    hybridSearchChunks(queryEmbedding, query, 8),
-  ]);
-
-  // 2️⃣ Rerank by term overlap
-  const relevantNodes = rerankByTermOverlap(rawNodes, query).slice(0, 5);
-  const relevantChunks = rerankByTermOverlap(
-    rawChunks.map((c) => ({ ...c, description: c.content })),
-    query
-  ).slice(0, 6) as MatchedChunk[];
-
-  // 3️⃣ Similarity threshold filter (drop very low quality hits)
-  const THRESHOLD = 0.35;
-  const filteredNodes = relevantNodes.filter((n) => n.similarity >= THRESHOLD);
-  const filteredChunks = relevantChunks.filter((c) => c.similarity >= THRESHOLD);
-
-  if (filteredNodes.length === 0 && filteredChunks.length === 0) {
+  if (agent.decision === "abstain" || !state.chunks.length) {
     return {
-      content: "No relevant knowledge found in the graph for your query. Try rephrasing or adding more documents.",
+      content: "I could not find enough source evidence in the uploaded knowledge base to answer this reliably.",
       sources: [],
-      reasoningTrace: [],
+      reasoningTrace: state.trace.map(
+        (item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`
+      ),
     };
   }
 
-  // 4️⃣ Graph expansion from matched node IDs
-  const nodeIds = filteredNodes.map((n) => n.id);
-  const chunkNodeIds = filteredChunks.map((c) => c.node_id).filter((id) => !nodeIds.includes(id));
-  const allNodeIds = [...new Set([...nodeIds, ...chunkNodeIds])];
-
-  const { data: subgraph } = await supabase.rpc("expand_graph", {
-    start_ids: allNodeIds,
-    max_depth: 2,
+  const verification = await runVerificationPipeline({
+    originalQuery: query,
+    nodes: state.nodes,
+    chunks: state.chunks,
+    claims: state.evidenceClaims,
+    maxRetries: 1,
   });
 
-  // 5️⃣ Fetch full node details
-  const { data: fullNodes } = await supabase
-    .from("nodes")
-    .select("id, label, type, description, properties, confidence")
-    .in("id", allNodeIds);
+  const verificationTrace = verification.trace.map((item, index) => `verify:${index + 1} — ${item}`);
 
-  // 6️⃣ Build LLM context
+  if (verification.available && verification.decision === "abstain") {
+    return {
+      content:
+        "I found related material, but claim-level verification did not produce enough reliable support after the bounded retry, so I’m abstaining rather than presenting an uncertain answer.",
+      sources: [],
+      reasoningTrace: [
+        ...state.trace.map((item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`),
+        ...verificationTrace,
+      ],
+    };
+  }
+
+  const workingNodes = verification.nodes;
+  const workingChunks = verification.chunks;
+  const workingClaims = verification.claims;
+  const supportedClaimIds = new Set(
+    verification.results
+      .filter((item) => item.label === "SUPPORTED")
+      .map((item) => item.claimId)
+  );
+  const supportedClaims = verification.available
+    ? workingClaims.filter((claim: any) => supportedClaimIds.has(claim.id))
+    : workingClaims;
+
+  const requestedNodeIds = [
+    ...new Set([
+      ...workingNodes.map((node) => node.id),
+      ...workingChunks.map((chunk) => chunk.node_id),
+      ...state.expandedNodeIds,
+    ]),
+  ].slice(0, 40);
+
+  const { data: fullNodes, error: nodesError } = requestedNodeIds.length
+    ? await supabase
+        .from("nodes")
+        .select("id,label,type,description,properties,confidence")
+        .in("id", requestedNodeIds)
+    : { data: [], error: null };
+  if (nodesError) throw nodesError;
+
   const nodeContext =
-    (fullNodes as any[])
-      ?.map(
-        (n) =>
-          `[NODE] ${n.label} (${n.type}) — confidence: ${n.confidence ?? 1.0}
-  ${n.description}${n.properties && Object.keys(n.properties).length > 0 ? `\n  Properties: ${JSON.stringify(n.properties)}` : ""}`
+    (fullNodes || [])
+      .map(
+        (node: any) =>
+          `[NODE] ${node.label} (${node.type}) — confidence: ${node.confidence ?? 1}\n${node.description}${
+            node.properties && Object.keys(node.properties).length
+              ? `\nProperties: ${JSON.stringify(node.properties)}`
+              : ""
+          }`
       )
       .join("\n\n") || "None";
 
   const edgeContext =
-    (subgraph as SubgraphEdge[])
-      ?.map((e) => `  ${e.source} ──[${e.relationship}]──> ${e.target}`)
-      .join("\n") || "None";
+    state.expandedEdges
+      .map((edge) => `${edge.source} --[${edge.relationship}]--> ${edge.target}`)
+      .join("\n") || "Graph expansion was not required by the agent.";
 
-  const chunkContext =
-    filteredChunks
-      .map(
-        (c, i) =>
-          `[CHUNK ${i + 1} | node: ${c.node_id} | match: ${(c.similarity * 100).toFixed(0)}%]\n${c.content}`
-      )
-      .join("\n\n") || "None";
+  const chunkContext = workingChunks
+    .map((chunk, index) => {
+      const metadata: any = chunk.metadata || {};
+      const pageStart = metadata.pageStart;
+      const pageEnd = metadata.pageEnd;
+      const pages = pageStart
+        ? ` | pages ${pageStart}${pageEnd && pageEnd !== pageStart ? `-${pageEnd}` : ""}`
+        : "";
+      return `[CHUNK ${index + 1} | id ${chunk.id} | node ${chunk.node_id}${pages} | score ${chunk.similarity.toFixed(3)}]\n${chunk.content}`;
+    })
+    .join("\n\n");
 
-  // 7️⃣ Build source citations for the client
+  const evidenceContext = supportedClaims.length
+    ? supportedClaims
+        .map((claim: any, index: number) => {
+          const verificationItem = verification.results.find((item) => item.claimId === claim.id);
+          const pages = claim.page_start
+            ? ` pages ${claim.page_start}${claim.page_end && claim.page_end !== claim.page_start ? `-${claim.page_end}` : ""}`
+            : "";
+          const supportingChunkIds = (claim.evidence || [])
+            .map((item: any) => item.chunk_id)
+            .join(", ");
+          return `[VERIFIED CLAIM ${index + 1} | SUPPORTED | verifier confidence ${Number(
+            verificationItem?.confidence ?? 1
+          ).toFixed(2)} | source ${claim.source_doc_id || "unknown"}${pages} | chunks ${supportingChunkIds}]\n${claim.claim_text}`;
+        })
+        .join("\n\n")
+    : "No structured claims passed verification; rely only on the original source chunks.";
+
+  const verificationFindings = verification.available
+    ? verification.results
+        .filter((item) => item.label !== "SUPPORTED")
+        .map(
+          (item) =>
+            `[${item.label} | confidence ${item.confidence.toFixed(2)}] ${item.claimText}\nReason: ${item.reason}`
+        )
+        .join("\n\n") || "No contradicted or insufficient structured claims."
+    : "Structured claim verification was unavailable; use raw chunks conservatively.";
+
+  const agentTrace = state.trace
+    .map(
+      (item) =>
+        `[STEP ${item.step}] TOOL=${item.tool}\nReason: ${item.reason}\nObservation: ${item.observation}`
+    )
+    .join("\n\n");
+
   const sources: SourceCitation[] = [
-    ...filteredNodes.map((n) => ({
-      nodeId: n.id,
-      nodeLabel: n.label,
-      similarity: n.similarity,
+    ...workingNodes.map((node) => ({
+      nodeId: node.id,
+      nodeLabel: node.label,
+      similarity: node.similarity,
     })),
-    ...filteredChunks.map((c) => ({
-      nodeId: c.node_id,
-      nodeLabel: (fullNodes as any[])?.find((n) => n.id === c.node_id)?.label ?? c.node_id,
-      similarity: c.similarity,
-      chunkContent: c.content.slice(0, 120) + (c.content.length > 120 ? "…" : ""),
-    })),
+    ...workingChunks.map((chunk) => {
+      const metadata: any = chunk.metadata || {};
+      return {
+        nodeId: chunk.node_id,
+        nodeLabel:
+          (fullNodes || []).find((node: any) => node.id === chunk.node_id)?.label ?? chunk.node_id,
+        similarity: chunk.similarity,
+        chunkId: chunk.id,
+        sourceDocId: metadata.sourceDocId || metadata.source_doc_id || undefined,
+        pageStart: metadata.pageStart,
+        pageEnd: metadata.pageEnd,
+        chunkContent: chunk.content.slice(0, 160) + (chunk.content.length > 160 ? "…" : ""),
+      };
+    }),
   ];
 
-  // 8️⃣ Build reasoning trace (path through the graph)
-  const reasoningTrace = allNodeIds.slice(0, 6);
-
-  // 9️⃣ Generate answer
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
   const result = await model.generateContent(`
-You are a precise technical expert. Answer using ONLY the knowledge graph and text chunks below.
+You are the synthesis component of a bounded evidence-grounded graph agent with claim verification.
+
+=== AGENT TOOL TRACE ===
+${agentTrace}
+
+=== VERIFICATION SUMMARY ===
+available=${verification.available}
+retried=${verification.retried}
+supported=${verification.summary.supported}
+contradicted=${verification.summary.contradicted}
+insufficient=${verification.summary.insufficient}
+selective_score=${verification.summary.calibratedScore.toFixed(3)}
 
 === GRAPH NODES ===
 ${nodeContext}
@@ -463,71 +365,67 @@ ${nodeContext}
 === GRAPH CONNECTIONS ===
 ${edgeContext}
 
-=== SUPPORTING TEXT CHUNKS ===
+=== VERIFIED SUPPORTED CLAIMS ===
+${evidenceContext}
+
+=== VERIFICATION FINDINGS TO TREAT AS WARNINGS ===
+${verificationFindings}
+
+=== ORIGINAL SOURCE CHUNKS ===
 ${chunkContext}
 
 === USER QUESTION ===
 ${query}
 
 Rules:
-- Use ONLY the data above. Do not use external knowledge.
-- If the data is insufficient, say so explicitly.
-- Cite node labels or chunk numbers when referencing specific facts.
-- Be clear, structured, and technically precise.
+- Answer ONLY from the supplied evidence.
+- Original source chunks are the ultimate source of truth.
+- Use structured claims positively only when they appear under VERIFIED SUPPORTED CLAIMS.
+- CONTRADICTED or INSUFFICIENT findings must not be presented as established facts.
+- If sources disagree, explicitly state the disagreement.
+- Preserve uncertainty, negation, numerical qualifiers, and conditions.
+- If the remaining verified evidence is insufficient for part of the question, state that limitation.
+- Cite chunk numbers/pages in the prose whenever practical.
 `);
 
   return {
     content: result.response.text(),
     sources,
-    reasoningTrace,
+    reasoningTrace: [
+      ...state.trace.map((item) => `${item.step}:${item.tool} — ${item.reason} | ${item.observation}`),
+      ...verificationTrace,
+    ],
   };
 }
-
-/* =========================
-   CHAT ENDPOINT — SSE STREAMING
-========================= */
 
 app.post("/api/chat", async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ message: "Query required" });
 
-  console.log("🔥 /api/chat:", query);
-
-  // Set SSE headers for streaming
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const sendEvent = (data: object) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
+  const sendEvent = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
 
   try {
-    const { content, sources, reasoningTrace } = await queryGraphRAG(query);
-
-    // Stream content word by word
-    const words = content.split(" ");
-    for (const word of words) {
-      sendEvent({ token: word + " " });
-      await new Promise((r) => setTimeout(r, 12));
+    const { content, sources, reasoningTrace } = await queryAdaptiveGraphAgent(query);
+    for (const word of content.split(" ")) {
+      sendEvent({ token: `${word} ` });
+      await new Promise((resolve) => setTimeout(resolve, 12));
     }
-
-    // Send metadata after content
     sendEvent({ sources, reasoningTrace });
     res.write("data: [DONE]\n\n");
     res.end();
   } catch (error: any) {
-    console.error("RAG error:", error);
+    console.error("Adaptive agent error:", error);
     sendEvent({ error: error.message || "Query failed" });
     res.end();
   }
 });
 
-/* =========================
-   CHUNK INSERT ENDPOINT
-========================= */
-
+// Legacy endpoint retained for compatibility. Phase 3+ PDF ingestion uses /api/evidence/chunks/insert.
 app.post("/api/chunks/insert", async (req, res) => {
   const { node_id, content, chunk_index, metadata, source_url } = req.body;
   if (!node_id || !content) {
@@ -549,17 +447,24 @@ app.post("/api/chunks/insert", async (req, res) => {
   }
 });
 
-/* =========================
-   CLEAR
-========================= */
+app.post("/api/graph/clear", async (_req, res) => {
+  const evidenceTables = ["claim_relations", "claim_entities", "claim_evidence", "claims", "documents"];
+  for (const table of evidenceTables) {
+    const { error } = await supabase
+      .from(table)
+      .delete()
+      .neq("created_at", "1900-01-01T00:00:00Z");
+    if (error) console.warn(`Unable to clear optional evidence table ${table}:`, error.message);
+  }
 
-app.post("/api/graph/clear", async (req, res) => {
   await supabase.from("chunks").delete().neq("id", "00000000-0000-0000-0000-000000000000");
   await supabase.from("links").delete().neq("id", "00000000-0000-0000-0000-000000000000");
   await supabase.from("nodes").delete().neq("id", "");
-  res.json({ message: "Graph and chunks cleared" });
+  res.json({ message: "Graph, chunks, and evidence cleared" });
 });
 
-app.get("/", (_req, res) => res.send("Backend running 🚀"));
+app.get("/", (_req, res) =>
+  res.send("Adaptive evidence-grounded GraphRAG backend with claim verification running 🚀")
+);
 
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
