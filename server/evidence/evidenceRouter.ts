@@ -2,6 +2,10 @@ import { Router } from "express";
 import { generateEmbedding } from "../embedding";
 import { supabase } from "../supabase";
 import { fetchEvidenceForChunks, ingestEvidenceForChunk } from "./evidenceService";
+import {
+  parseEvaluationMode,
+  runEvaluationQuery,
+} from "../evaluation/evaluationService";
 
 const router = Router();
 
@@ -48,7 +52,6 @@ router.post("/chunks/insert", async (req, res) => {
         totalPages: metadata?.totalPages,
       });
     } catch (evidenceError: any) {
-      // Preserve ingestion if the migration has not yet been applied or evidence extraction fails.
       evidenceStatus = "deferred";
       evidenceWarning = evidenceError?.message || "Evidence extraction failed";
       console.warn("Evidence ingestion deferred:", evidenceWarning);
@@ -76,6 +79,72 @@ router.post("/for-chunks", async (req, res) => {
     res.json({ claims });
   } catch (error: any) {
     res.status(500).json({ message: error?.message || "Evidence retrieval failed" });
+  }
+});
+
+router.post("/evaluate", async (req, res) => {
+  const query = typeof req.body?.query === "string" ? req.body.query.trim() : "";
+  if (!query) return res.status(400).json({ message: "Query required" });
+
+  let mode;
+  try {
+    mode = parseEvaluationMode(req.body?.mode);
+  } catch (error: any) {
+    return res.status(400).json({ message: error.message });
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const sendEvent = (data: object) =>
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  const requestStarted = Date.now();
+  console.log(`[evaluate] mode=${mode} query=${query.slice(0, 120)}`);
+  sendEvent({ status: `Starting ${mode} evaluation...`, mode });
+
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) sendEvent({ heartbeat: true });
+  }, 8_000);
+
+  try {
+    const result = await runEvaluationQuery(query, mode, (status) =>
+      sendEvent({ status, mode })
+    );
+
+    sendEvent({ status: `Streaming ${mode} answer...`, mode });
+    for (const word of result.content.split(" ")) {
+      sendEvent({ token: `${word} ` });
+      await new Promise((resolve) => setTimeout(resolve, 8));
+    }
+
+    sendEvent({
+      mode: result.mode,
+      sources: result.sources,
+      reasoningTrace: result.reasoningTrace,
+      evaluation: {
+        abstained: result.abstained,
+        timings: result.timings,
+        counts: result.counts,
+        toolCalls: result.toolCalls,
+        verification: result.verification,
+      },
+    });
+    res.write("data: [DONE]\n\n");
+    res.end();
+
+    console.log(
+      `[evaluate] mode=${mode} completed=${Date.now() - requestStarted}ms core=${result.timings.totalMs}ms abstained=${result.abstained}`
+    );
+  } catch (error: any) {
+    console.error(`[evaluate] mode=${mode} failed:`, error);
+    sendEvent({ error: error?.message || "Evaluation query failed", mode });
+    res.end();
+  } finally {
+    clearInterval(heartbeat);
   }
 });
 
