@@ -13,7 +13,8 @@ dotenv.config({ path: path.resolve(process.cwd(), "server", ".env") });
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3100;
+const HOST = process.env.HOST || "127.0.0.1";
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
 if (!GOOGLE_API_KEY) {
@@ -23,9 +24,16 @@ if (!GOOGLE_API_KEY) {
 
 const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
 
-app.use(cors());
+app.use(cors({
+  origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+  methods: ["GET", "POST"],
+}));
 app.use(express.json({ limit: "10mb" }));
 app.use("/api/evidence", evidenceRouter);
+
+app.get("/health", (_req, res) =>
+  res.json({ status: "ok", service: "graph-rag", version: "1.0.0" })
+);
 
 interface Node {
   id: string;
@@ -454,6 +462,68 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
+app.post("/api/integration/retrieve", async (req, res) => {
+  const query = typeof req.body?.query === "string" ? req.body.query.trim() : "";
+  if (!query) return res.status(400).json({ message: "Query required" });
+
+  try {
+    const agent = await runAdaptiveAgent(query, { maxSteps: 6, maxRequeries: 1 });
+    const state = agent.state;
+    if (agent.decision === "abstain" || !state.chunks.length) {
+      return res.json({
+        status: "abstained",
+        nodes: [],
+        chunks: [],
+        claims: [],
+        verification: null,
+        trace: state.trace,
+      });
+    }
+
+    const verification = await runVerificationPipeline({
+      originalQuery: query,
+      nodes: state.nodes,
+      chunks: state.chunks,
+      claims: state.evidenceClaims,
+      maxRetries: 1,
+    });
+    const supportedClaimIds = new Set(
+      verification.results
+        .filter((item) => item.label === "SUPPORTED")
+        .map((item) => item.claimId)
+    );
+    const claims = verification.available
+      ? verification.claims.filter((claim) => supportedClaimIds.has(claim.id))
+      : [];
+
+    return res.json({
+      status: verification.available && verification.decision === "abstain" ? "abstained" : "grounded",
+      nodes: verification.nodes,
+      chunks: verification.chunks,
+      claims,
+      verification: {
+        available: verification.available,
+        retried: verification.retried,
+        decision: verification.decision,
+        summary: verification.summary,
+        results: verification.results,
+      },
+      trace: [...state.trace, ...verification.trace.map((observation, index) => ({
+        step: state.trace.length + index + 1,
+        tool: "verification",
+        reason: "Verify structured claims against retrieved source chunks.",
+        observation,
+      }))],
+    });
+  } catch (error: any) {
+    console.error("Integration retrieval failed:", error);
+    return res.status(503).json({
+      message: "Graph evidence retrieval unavailable",
+      detail: error?.message || "unknown error",
+    });
+  }
+});
+
 // Legacy endpoint retained for compatibility. Phase 3+ PDF ingestion uses /api/evidence/chunks/insert.
 app.post("/api/chunks/insert", async (req, res) => {
   const { node_id, content, chunk_index, metadata, source_url } = req.body;
@@ -496,4 +566,4 @@ app.get("/", (_req, res) =>
   res.send("Adaptive evidence-grounded GraphRAG backend with claim verification running 🚀")
 );
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+app.listen(Number(PORT), HOST, () => console.log(`Server running on http://${HOST}:${PORT}`));

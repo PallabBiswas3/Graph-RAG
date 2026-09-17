@@ -40,7 +40,7 @@ npm install
 Create `.env` in `server/`:
 ```env
 GOOGLE_API_KEY=your_gemini_api_key
-PORT=3000
+PORT=3100
 ```
 
 ### Run Development Servers
@@ -53,7 +53,7 @@ cd server && npm run dev
 cd client && npm run dev
 ```
 
-Access at http://localhost:5173
+Access at http://localhost:5173. The API listens on `http://localhost:3100` by default so it can run beside the SovereignAI frontend on port 3000.
 
 ## 📖 Usage
 

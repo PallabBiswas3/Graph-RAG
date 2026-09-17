@@ -1,7 +1,7 @@
 import { ExtractionResult, GraphData, ChatMessage } from "../types";
 import { PDFChunk } from "./pdfService";
 
-export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3100").replace(/\/$/, "");
 
 export type EvaluationMode = "fixed" | "adaptive" | "adaptive_verified";
 
