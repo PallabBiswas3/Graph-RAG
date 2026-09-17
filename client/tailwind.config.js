@@ -3,7 +3,12 @@
 export default {
   content: [
     "./index.html",
-    "./**/*.{js,ts,jsx,tsx}",
+    "./*.{ts,tsx}",
+    "./chat/**/*.{ts,tsx}",
+    "./components/**/*.{ts,tsx}",
+    "./graph/**/*.{ts,tsx}",
+    "./ingestion/**/*.{ts,tsx}",
+    "./layout/**/*.{ts,tsx}",
   ],
   theme: {
     extend: {

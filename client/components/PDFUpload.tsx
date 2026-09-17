@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { extractTextFromPDF, validatePDFFile } from '../services/pdfService';
+import { API_BASE_URL } from '../services/geminiService';
 
 interface Node {
   id: string;
@@ -46,7 +47,7 @@ const PDFUpload: React.FC = () => {
       const text = await extractTextFromPDF(file);
 
       // Call backend API
-      const res = await fetch('http://localhost:3000/api/graph/extract', {
+      const res = await fetch(`${API_BASE_URL}/api/graph/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
